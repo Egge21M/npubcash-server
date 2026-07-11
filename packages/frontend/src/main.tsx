@@ -3,6 +3,7 @@ import { RouterProvider, createRouter } from "@tanstack/react-router";
 import { routeTree } from "./routeTree.gen";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { AuthLoadingScreen } from "./components/AuthLoadingScreen";
+import { TooltipProvider } from "./components/ui/tooltip";
 
 import "./index.css";
 
@@ -32,6 +33,8 @@ function InnerApp() {
 
 createRoot(document.getElementById("root")!).render(
   <AuthProvider>
-    <InnerApp />
+    <TooltipProvider>
+      <InnerApp />
+    </TooltipProvider>
   </AuthProvider>
 );

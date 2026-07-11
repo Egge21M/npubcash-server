@@ -1,29 +1,77 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import {
-  Zap,
-  Shield,
-  Wifi,
-  Code,
   ArrowRight,
+  Check,
+  CircleDollarSign,
+  CloudOff,
+  Code2,
+  Copy,
   Github,
-  Send,
   Landmark,
+  LockKeyhole,
+  MoveDown,
+  Radio,
+  Send,
+  ShieldCheck,
+  Sparkles,
   Wallet,
+  Zap,
 } from "lucide-react";
+import { Brand } from "@/components/Brand";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Separator } from "@/components/ui/separator";
 
-export const Route = createFileRoute("/")({
-  component: HomePage,
-});
+export const Route = createFileRoute("/")({ component: HomePage });
+
+const features = [
+  {
+    icon: CloudOff,
+    eyebrow: "Always available",
+    title: "Get paid while you sleep",
+    description:
+      "Your address keeps receiving even when your browser is closed. Claim the eCash whenever you come back.",
+  },
+  {
+    icon: LockKeyhole,
+    eyebrow: "Yours by design",
+    title: "Identity is the account",
+    description:
+      "Funds are locked to your Nostr public key. No new password, recovery phrase, or account database required.",
+  },
+  {
+    icon: CircleDollarSign,
+    eyebrow: "Cashu-native",
+    title: "Private digital cash",
+    description:
+      "Receive Lightning and hold it as Cashu eCash, with mint-level balances visible in one focused wallet.",
+  },
+  {
+    icon: Code2,
+    eyebrow: "Open protocols",
+    title: "Built in the open",
+    description:
+      "Nostr, Lightning, and Cashu are composable public protocols. Inspect the code, run it, or build on top.",
+  },
+];
 
 function HomePage() {
   return (
-    <div className="-mx-4 -mt-4 flex flex-col">
+    <div className="-mx-4 -my-6 flex flex-col sm:-mx-6 sm:-my-8 lg:-mx-8">
       <HeroSection />
+      <ProtocolStrip />
       <FeaturesSection />
       <HowItWorksSection />
-      <CTASection />
+      <ClosingSection />
       <Footer />
     </div>
   );
@@ -31,49 +79,141 @@ function HomePage() {
 
 function HeroSection() {
   return (
-    <section className="relative overflow-hidden border-b bg-gradient-to-b from-primary/5 via-background to-background px-4 pb-20 pt-16">
-      {/* Background decoration */}
-      <div className="absolute inset-0 -z-10">
-        <div className="absolute left-1/4 top-0 h-72 w-72 rounded-full bg-primary/10 blur-3xl" />
-        <div className="absolute right-1/4 top-20 h-64 w-64 rounded-full bg-chart-2/10 blur-3xl" />
-      </div>
-
-      <div className="mx-auto flex max-w-4xl flex-col items-center gap-8 text-center">
-        <div className="flex flex-col gap-3">
-          <div className="mx-auto flex items-center gap-2 rounded-full border bg-card/50 px-4 py-1.5 text-sm text-muted-foreground backdrop-blur-sm">
-            <Zap className="h-4 w-4 text-primary" />
-            <span>Powered by Lightning, Cashu & Nostr</span>
+    <section className="relative overflow-hidden px-4 pb-20 pt-16 sm:px-6 sm:pt-24 lg:px-8 lg:pb-28">
+      <div className="brand-grid pointer-events-none absolute inset-0" />
+      <div className="relative mx-auto grid max-w-7xl items-center gap-14 lg:grid-cols-[1.05fr_0.95fr] lg:gap-20">
+        <div className="flex max-w-3xl flex-col items-start gap-7">
+          <Badge variant="secondary" className="rounded-full px-3 py-1">
+            <Sparkles data-icon="inline-start" />
+            Money for the open social web
+          </Badge>
+          <div className="flex flex-col gap-5">
+            <h1 className="text-pretty text-5xl font-semibold tracking-[-0.045em] sm:text-6xl lg:text-7xl">
+              Your Nostr identity is now a{" "}
+              <span className="text-primary">Lightning address.</span>
+            </h1>
+            <p className="text-pretty max-w-2xl text-lg leading-8 text-muted-foreground sm:text-xl">
+              Receive sats at your npub, hold private eCash, and take your wallet
+              anywhere. No signup. No new identity. No compromise.
+            </p>
           </div>
-          <h1 className="bg-gradient-to-r from-primary via-chart-3 to-chart-2 bg-clip-text text-5xl font-bold tracking-tight text-transparent md:text-7xl">
-            npub.cash
-          </h1>
-          <p className="text-xl text-muted-foreground md:text-2xl">
-            A nostr native Lightning Address for everyone
-          </p>
+          <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row">
+            <Button nativeButton={false} render={<Link to="/wallet" />} size="lg" className="h-11 px-5">
+              <Wallet data-icon="inline-start" />
+              Open your wallet
+              <ArrowRight data-icon="inline-end" />
+            </Button>
+            <Button
+              nativeButton={false}
+              render={
+                <a
+                  href="https://docs.cashu-address.com/"
+                  target="_blank"
+                  rel="noreferrer"
+                />
+              }
+              variant="outline"
+              size="lg"
+              className="h-11 px-5"
+            >
+              See how it works
+            </Button>
+          </div>
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-muted-foreground">
+            {["Nostr-native", "Open source", "Works offline"].map((item) => (
+              <span key={item} className="inline-flex items-center gap-1.5">
+                <Check className="text-primary" aria-hidden="true" />
+                {item}
+              </span>
+            ))}
+          </div>
         </div>
 
-        <Card className="border-primary/20 bg-card/80 backdrop-blur-sm">
-          <CardContent className="px-6 py-4">
-            <code className="bg-gradient-to-r from-primary to-chart-2 bg-clip-text text-lg font-semibold text-transparent md:text-2xl">
-              {"<npub|username>@npub.cash"}
-            </code>
-          </CardContent>
-        </Card>
+        <WalletPreview />
+      </div>
+    </section>
+  );
+}
 
-        <div className="flex flex-col gap-3 sm:flex-row sm:gap-4">
-          <Button render={<Link to="/wallet" />} size="lg" className="gap-2 px-6">
-            <Wallet className="h-4 w-4" />
-            Open Wallet
-          </Button>
-          <Button
-            render={<Link to="/wallet" />}
-            variant="outline"
-            size="lg"
-            className="gap-2 px-6"
-          >
-            Claim Username
-            <ArrowRight className="h-4 w-4" />
-          </Button>
+function WalletPreview() {
+  return (
+    <div className="relative mx-auto w-full max-w-lg lg:mx-0">
+      <div className="absolute -inset-8 rounded-[3rem] bg-primary/10 blur-3xl" />
+      <Card className="relative gap-6 border-primary/20 bg-card/90 p-2 shadow-2xl shadow-primary/10 backdrop-blur-xl">
+        <CardHeader className="pt-3">
+          <CardDescription>Available balance</CardDescription>
+          <CardTitle className="text-4xl font-semibold tracking-tight">
+            21,840 <span className="text-base font-normal text-muted-foreground">sats</span>
+          </CardTitle>
+          <CardAction>
+            <Badge variant="secondary">Synced</Badge>
+          </CardAction>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-5">
+          <div className="flex flex-col gap-2 rounded-2xl bg-muted/70 p-4">
+            <span className="text-xs font-medium uppercase tracking-widest text-muted-foreground">
+              Your address
+            </span>
+            <div className="flex items-center justify-between gap-3">
+              <span className="truncate font-mono text-sm font-medium">
+                you@npub.cash
+              </span>
+              <Button variant="ghost" size="icon-sm" aria-label="Copy address">
+                <Copy />
+              </Button>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Button size="lg">
+              <Send data-icon="inline-start" />
+              Send
+            </Button>
+            <Button variant="secondary" size="lg">
+              <MoveDown data-icon="inline-start" />
+              Receive
+            </Button>
+          </div>
+          <Separator />
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center justify-between text-sm">
+              <span className="font-medium">Recent activity</span>
+              <span className="text-xs text-muted-foreground">Today</span>
+            </div>
+            <div className="flex items-center justify-between gap-4 rounded-xl bg-muted/50 p-3">
+              <div className="flex items-center gap-3">
+                <span className="flex size-9 items-center justify-center rounded-full bg-secondary text-secondary-foreground">
+                  <Zap />
+                </span>
+                <div className="flex flex-col">
+                  <span className="text-sm font-medium">Lightning received</span>
+                  <span className="text-xs text-muted-foreground">npub.cash</span>
+                </div>
+              </div>
+              <span className="text-sm font-semibold text-primary">+2,100 sats</span>
+            </div>
+          </div>
+        </CardContent>
+        <CardFooter className="justify-center text-xs text-muted-foreground">
+          Preview wallet · Your balance will look different
+        </CardFooter>
+      </Card>
+    </div>
+  );
+}
+
+function ProtocolStrip() {
+  return (
+    <section className="border-y bg-card/70 px-4 py-5 sm:px-6 lg:px-8">
+      <div className="mx-auto flex max-w-7xl flex-col items-center justify-between gap-4 sm:flex-row">
+        <p className="text-sm font-medium text-muted-foreground">
+          Three open protocols. One simple address.
+        </p>
+        <div className="flex flex-wrap items-center justify-center gap-2">
+          <Badge variant="outline"><Radio data-icon="inline-start" />Nostr identity</Badge>
+          <span className="text-muted-foreground">+</span>
+          <Badge variant="outline"><Zap data-icon="inline-start" />Lightning rails</Badge>
+          <span className="text-muted-foreground">+</span>
+          <Badge variant="outline"><CircleDollarSign data-icon="inline-start" />Cashu eCash</Badge>
         </div>
       </div>
     </section>
@@ -81,65 +221,36 @@ function HeroSection() {
 }
 
 function FeaturesSection() {
-  const features = [
-    {
-      icon: Zap,
-      title: "No Sign-Up Required",
-      description:
-        "Use any nostr public key (npub) as your Lightning address instantly. No registration needed.",
-    },
-    {
-      icon: Shield,
-      title: "Trust Minimized",
-      description:
-        "Your balance is locked to your public key using cryptographic signatures.",
-    },
-    {
-      icon: Wifi,
-      title: "Offline Payments",
-      description:
-        "Receive payments even when offline. Cashu eCash waits for you to claim it.",
-    },
-    {
-      icon: Code,
-      title: "Open Source",
-      description:
-        "Built on open protocols. Fully transparent and community-driven.",
-    },
-  ];
-
   return (
-    <section className="border-b bg-muted/30 px-4 py-20">
-      <div className="mx-auto max-w-4xl">
-        <div className="mb-12 text-center">
-          <h2 className="mb-3 text-3xl font-bold md:text-4xl">
-            Lightning Address,{" "}
-            <span className="bg-gradient-to-r from-primary to-chart-2 bg-clip-text text-transparent">
-              Reimagined
-            </span>
+    <section className="px-4 py-20 sm:px-6 lg:px-8 lg:py-28">
+      <div className="mx-auto flex max-w-7xl flex-col gap-12">
+        <div className="flex max-w-3xl flex-col gap-4">
+          <Badge variant="secondary" className="w-fit">Built differently</Badge>
+          <h2 className="text-pretty text-3xl font-semibold tracking-tight sm:text-5xl">
+            A wallet that feels invisible until you need it.
           </h2>
-          <p className="mx-auto max-w-2xl text-lg text-muted-foreground">
-            Receive Lightning payments on your npub.cash address. Powered by
-            eCash for privacy and nostr for identity.
+          <p className="text-pretty text-lg leading-8 text-muted-foreground">
+            npub.cash turns the identity you already use into a dependable way
+            to receive money—without recreating the banking system around it.
           </p>
         </div>
-
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          {features.map((feature) => (
+        <div className="grid gap-4 md:grid-cols-2">
+          {features.map((feature, index) => (
             <Card
               key={feature.title}
-              className="group border-border/50 bg-card/50 transition-all hover:border-primary/30 hover:bg-card hover:shadow-lg hover:shadow-primary/5"
+              className={index === 0 || index === 3 ? "bg-secondary/40" : undefined}
             >
-              <CardContent className="flex gap-4 p-6">
-                <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary transition-colors group-hover:bg-primary group-hover:text-primary-foreground">
-                  <feature.icon className="h-6 w-6" />
-                </div>
-                <div>
-                  <h3 className="mb-1 font-semibold">{feature.title}</h3>
-                  <p className="text-sm text-muted-foreground">
-                    {feature.description}
-                  </p>
-                </div>
+              <CardHeader>
+                <span className="mb-3 flex size-11 items-center justify-center rounded-2xl bg-primary text-primary-foreground">
+                  <feature.icon />
+                </span>
+                <CardDescription>{feature.eyebrow}</CardDescription>
+                <CardTitle className="text-xl">{feature.title}</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-pretty leading-6 text-muted-foreground">
+                  {feature.description}
+                </p>
               </CardContent>
             </Card>
           ))}
@@ -153,154 +264,111 @@ function HowItWorksSection() {
   const steps = [
     {
       icon: Send,
-      step: 1,
-      title: "Send Payment",
-      description:
-        "Alice sends a Lightning payment to Bob's npub.cash address",
+      number: "01",
+      title: "Share your address",
+      description: "Use your npub or claim a memorable username at npub.cash.",
     },
     {
       icon: Landmark,
-      step: 2,
-      title: "Mint eCash",
-      description:
-        "The payment is forwarded to a Cashu mint which creates eCash locked to Bob's key",
+      number: "02",
+      title: "Receive over Lightning",
+      description: "Payments are converted into Cashu eCash locked to your key.",
     },
     {
-      icon: Wallet,
-      step: 3,
-      title: "Claim Funds",
-      description:
-        "When Bob comes online, he claims the eCash with his Cashu wallet",
+      icon: ShieldCheck,
+      number: "03",
+      title: "Claim on your terms",
+      description: "Open the wallet and your funds are waiting—even if you were offline.",
     },
   ];
 
   return (
-    <section className="px-4 py-20">
-      <div className="mx-auto max-w-4xl">
-        <div className="mb-12 text-center">
-          <h2 className="mb-3 text-3xl font-bold md:text-4xl">
-            How It{" "}
-            <span className="bg-gradient-to-r from-primary to-chart-2 bg-clip-text text-transparent">
-              Works
-            </span>
-          </h2>
-          <p className="mx-auto max-w-2xl text-muted-foreground">
-            npub.cash uses{" "}
-            <a
-              href="https://docs.cashu-address.com/"
-              className="text-primary underline-offset-4 hover:underline"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Cashu-Address
-            </a>
-            , a protocol combining Cashu eCash with nostr for seamless offline
-            Lightning payments.
+    <section className="border-y bg-muted/40 px-4 py-20 sm:px-6 lg:px-8 lg:py-28">
+      <div className="mx-auto flex max-w-7xl flex-col gap-12">
+        <div className="grid gap-6 lg:grid-cols-2 lg:items-end">
+          <div className="flex flex-col gap-4">
+            <Badge variant="outline" className="w-fit">From invoice to eCash</Badge>
+            <h2 className="text-pretty text-3xl font-semibold tracking-tight sm:text-5xl">
+              Lightning in. Private cash out.
+            </h2>
+          </div>
+          <p className="text-pretty text-lg leading-8 text-muted-foreground lg:justify-self-end lg:max-w-xl">
+            Cashu-Address bridges real-time Lightning payments with asynchronous,
+            bearer-style eCash—so receiving doesn’t depend on being online.
           </p>
         </div>
-
-        <div className="relative">
-          {/* Connection line */}
-          <div className="absolute left-1/2 top-8 hidden h-[calc(100%-4rem)] w-px -translate-x-1/2 bg-gradient-to-b from-primary/50 via-chart-3/50 to-chart-2/50 md:block" />
-
-          <div className="grid grid-cols-1 gap-6 md:grid-cols-3 md:gap-4">
-            {steps.map((item, index) => (
-              <div key={item.step} className="relative flex flex-col items-center">
-                {/* Step number bubble */}
-                <div className="relative z-10 mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-gradient-to-br from-primary to-chart-2 text-primary-foreground shadow-lg shadow-primary/25">
-                  <item.icon className="h-7 w-7" />
-                </div>
-
-                {/* Mobile arrow */}
-                {index < steps.length - 1 && (
-                  <div className="my-2 text-muted-foreground/50 md:hidden">
-                    <ArrowRight className="h-5 w-5 rotate-90" />
-                  </div>
-                )}
-
-                <Card className="w-full border-border/50 bg-card/50">
-                  <CardContent className="p-5 text-center">
-                    <div className="mb-2 text-sm font-medium text-primary">
-                      Step {item.step}
-                    </div>
-                    <h3 className="mb-2 font-semibold">{item.title}</h3>
-                    <p className="text-sm text-muted-foreground">
-                      {item.description}
-                    </p>
-                  </CardContent>
-                </Card>
-              </div>
-            ))}
-          </div>
+        <div className="grid gap-4 lg:grid-cols-3">
+          {steps.map((step) => (
+            <Card key={step.number}>
+              <CardHeader>
+                <CardAction>
+                  <span className="font-mono text-sm text-muted-foreground">{step.number}</span>
+                </CardAction>
+                <span className="mb-6 flex size-12 items-center justify-center rounded-2xl bg-secondary text-secondary-foreground">
+                  <step.icon />
+                </span>
+                <CardTitle className="text-lg">{step.title}</CardTitle>
+                <CardDescription className="text-pretty leading-6">
+                  {step.description}
+                </CardDescription>
+              </CardHeader>
+            </Card>
+          ))}
         </div>
       </div>
     </section>
   );
 }
 
-function CTASection() {
+function ClosingSection() {
   return (
-    <section className="border-y bg-gradient-to-r from-primary/10 via-chart-3/10 to-chart-2/10 px-4 py-16">
-      <div className="mx-auto max-w-4xl text-center">
-        <h2 className="mb-4 text-2xl font-bold md:text-3xl">
-          Ready to get started?
-        </h2>
-        <p className="mb-8 text-muted-foreground">
-          Create your Lightning address in seconds. No sign-up required.
-        </p>
-        <Button render={<Link to="/wallet" />} size="lg" className="gap-2 px-8">
-          <Zap className="h-4 w-4" />
-          Launch Wallet
-        </Button>
-      </div>
+    <section className="px-4 py-20 sm:px-6 lg:px-8 lg:py-28">
+      <Card className="mx-auto max-w-7xl border-primary/20 bg-primary text-primary-foreground">
+        <CardContent className="grid gap-10 p-8 sm:p-12 lg:grid-cols-[1fr_auto] lg:items-end lg:p-16">
+          <div className="flex max-w-3xl flex-col gap-4">
+            <span className="text-sm font-medium text-primary-foreground/70">Ready when you are</span>
+            <h2 className="text-pretty text-3xl font-semibold tracking-tight sm:text-5xl">
+              Your address already exists.
+            </h2>
+            <p className="text-pretty text-lg text-primary-foreground/75">
+              Connect your Nostr signer and start receiving sats in under a minute.
+            </p>
+          </div>
+          <Button nativeButton={false} render={<Link to="/wallet" />} variant="secondary" size="lg" className="h-11 px-5">
+            Open wallet
+            <ArrowRight data-icon="inline-end" />
+          </Button>
+        </CardContent>
+      </Card>
     </section>
   );
 }
 
 function Footer() {
   return (
-    <footer className="px-4 py-12">
-      <div className="mx-auto flex max-w-4xl flex-col items-center gap-6">
+    <footer className="border-t bg-card/60 px-4 py-10 sm:px-6 lg:px-8">
+      <div className="mx-auto flex max-w-7xl flex-col gap-8 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-col gap-2">
+          <Brand />
+          <p className="text-sm text-muted-foreground">Open money for the open social web.</p>
+        </div>
         <div className="flex items-center gap-2">
-          <span className="bg-gradient-to-r from-primary to-chart-2 bg-clip-text text-lg font-semibold text-transparent">
-            npub.cash
-          </span>
+          <Button
+            nativeButton={false}
+            render={<a href="https://github.com/Egge21M/npubcash-server" target="_blank" rel="noreferrer" />}
+            variant="outline"
+          >
+            <Github data-icon="inline-start" />
+            GitHub
+          </Button>
+          <Button
+            nativeButton={false}
+            render={<a href="https://docs.cashu-address.com/" target="_blank" rel="noreferrer" />}
+            variant="ghost"
+          >
+            Documentation
+          </Button>
         </div>
-
-        <div className="flex gap-4">
-          <a
-            href="https://github.com/gudnuf/npubcash-server"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex h-10 w-10 items-center justify-center rounded-full border bg-card text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
-          >
-            <Github className="h-5 w-5" />
-          </a>
-          <a
-            href="https://twitter.com/AustinKelsay"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex h-10 w-10 items-center justify-center rounded-full border bg-card text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
-          >
-            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
-            </svg>
-          </a>
-          <a
-            href="https://primal.net/p/npub1mhcr4j594hsrnen594d7700n2t03n8gdx83zhxzculk6sh9nhwlq7uc226"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex h-10 w-10 items-center justify-center rounded-full border bg-card text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
-          >
-            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M12 2C6.477 2 2 6.477 2 12c0 4.991 3.657 9.128 8.438 9.879V14.89h-2.54V12h2.54V9.797c0-2.506 1.492-3.89 3.777-3.89 1.094 0 2.238.195 2.238.195v2.46h-1.26c-1.243 0-1.63.771-1.63 1.562V12h2.773l-.443 2.89h-2.33v6.989C18.343 21.129 22 16.99 22 12c0-5.523-4.477-10-10-10z" />
-            </svg>
-          </a>
-        </div>
-
-        <p className="text-center text-sm text-muted-foreground">
-          Built with Lightning, Cashu eCash & Nostr
-        </p>
       </div>
     </footer>
   );

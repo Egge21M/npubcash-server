@@ -1,80 +1,25 @@
 import { Link } from "@tanstack/react-router";
 import { usePaginatedHistory } from "coco-cashu-react";
-import type { HistoryEntry } from "coco-cashu-core";
+import { ArrowRight, BarChart3 } from "lucide-react";
+import { TransactionList } from "@/components/TransactionList";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-
-function formatHistoryEntry(entry: HistoryEntry): {
-  label: string;
-  amount: string;
-  date: string;
-} {
-  const date = new Date(entry.createdAt).toLocaleDateString();
-  switch (entry.type) {
-    case "mint":
-      return { label: "Mint", amount: `+${entry.amount}`, date };
-    case "melt":
-      return { label: "Melt", amount: `-${entry.amount}`, date };
-    case "send":
-      return { label: "Send", amount: `-${entry.amount}`, date };
-    case "receive":
-      return { label: "Receive", amount: `+${entry.amount}`, date };
-  }
-}
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 
 export function HistoryCard() {
   const { history, isFetching } = usePaginatedHistory(5);
-
   return (
-    <Card>
+    <Card className="h-full">
       <CardHeader>
-        <CardTitle>Recent Activity</CardTitle>
-        <CardDescription>Your latest transactions</CardDescription>
+        <CardTitle>Recent activity</CardTitle>
+        <CardDescription>Your latest wallet movements.</CardDescription>
       </CardHeader>
-      <CardContent>
-        {isFetching && history.length === 0 ? (
-          <p className="text-muted-foreground text-sm">Loading...</p>
-        ) : history.length === 0 ? (
-          <p className="text-muted-foreground text-sm">No transactions yet</p>
-        ) : (
-          <ul className="space-y-2">
-            {history.map((entry) => {
-              const { label, amount, date } = formatHistoryEntry(entry);
-              return (
-                <li
-                  key={entry.id}
-                  className="flex items-center justify-between rounded bg-muted p-2"
-                >
-                  <div>
-                    <span className="text-sm font-medium">{label}</span>
-                    <span className="text-muted-foreground ml-2 text-xs">
-                      {date}
-                    </span>
-                  </div>
-                  <span
-                    className={`text-sm font-medium ${amount.startsWith("+") ? "text-green-600" : "text-red-600"}`}
-                  >
-                    {amount} sats
-                  </span>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-      </CardContent>
-      <CardFooter className="flex flex-col gap-2 sm:flex-row sm:justify-between">
-        <Button render={<Link to="/history" />} variant="outline" size="sm">
-          View All
+      <CardContent className="mt-auto"><TransactionList history={history} isFetching={isFetching} /></CardContent>
+      <CardFooter className="flex-wrap justify-between gap-2">
+        <Button nativeButton={false} render={<Link to="/history" />} variant="ghost" size="sm">
+          All activity<ArrowRight data-icon="inline-end" />
         </Button>
-        <Button render={<Link to="/payments" />} variant="outline" size="sm">
-          View Payments Chart
+        <Button nativeButton={false} render={<Link to="/payments" />} variant="ghost" size="sm">
+          <BarChart3 data-icon="inline-start" />Insights
         </Button>
       </CardFooter>
     </Card>
