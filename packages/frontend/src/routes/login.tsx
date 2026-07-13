@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { createFileRoute, redirect, useRouter } from "@tanstack/react-router";
 import QRCode from "react-qr-code";
-import { ArrowLeft, Check, Copy, KeyRound, Puzzle, Radio, ShieldCheck, Smartphone, TriangleAlert } from "lucide-react";
+import { ArrowLeft, Check, Copy, KeyRound, Puzzle, Radio, RefreshCw, ShieldCheck, Smartphone, TriangleAlert } from "lucide-react";
 import { Brand } from "@/components/Brand";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -19,13 +19,26 @@ export const Route = createFileRoute("/login")({
 });
 
 function Login() {
-  const { login, loginWithNip46, cancelNip46Login, nip46State, nip46Error, isLoading } = useAuth();
+  const {
+    login,
+    loginWithNip46,
+    retryNip46Login,
+    cancelNip46Login,
+    nip46State,
+    nip46Error,
+    nip46URI,
+    isAuthenticated,
+    isLoading,
+  } = useAuth();
   const router = useRouter();
-  const [nostrConnectURI, setNostrConnectURI] = useState<string | null>(null);
   const [extensionError, setExtensionError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  useEffect(() => { void router.invalidate(); }, [router]);
+  useEffect(() => {
+    if (isAuthenticated) {
+      void router.navigate({ to: "/wallet", replace: true });
+    }
+  }, [isAuthenticated, router]);
 
   const handleExtensionLogin = async () => {
     setExtensionError(null);
@@ -36,39 +49,67 @@ function Login() {
 
   const handleNip46Login = () => {
     setExtensionError(null);
-    setNostrConnectURI(loginWithNip46());
+    loginWithNip46();
   };
 
-  const handleCancelNip46 = () => { cancelNip46Login(); setNostrConnectURI(null); };
+  const handleCancelNip46 = () => { cancelNip46Login(); setCopied(false); };
   const copyToClipboard = async () => {
-    if (!nostrConnectURI) return;
-    await navigator.clipboard.writeText(nostrConnectURI);
+    if (!nip46URI) return;
+    await navigator.clipboard.writeText(nip46URI);
     setCopied(true); window.setTimeout(() => setCopied(false), 2000);
   };
   const error = extensionError || nip46Error;
 
-  if (nip46State === "awaiting" && nostrConnectURI) {
+  if ((nip46State === "preparing" || nip46State === "awaiting" || nip46State === "error") && nip46URI) {
+    const hasConnectionError = nip46State === "error";
+    const isPreparing = nip46State === "preparing";
     return (
       <div className="mx-auto flex min-h-[calc(100vh-10rem)] max-w-lg items-center justify-center py-8">
         <Card className="w-full border-primary/20 shadow-xl shadow-primary/10">
           <CardHeader className="items-center text-center">
-            <Badge variant="secondary"><Radio data-icon="inline-start" />Waiting for signer</Badge>
-            <CardTitle className="mt-3 text-2xl">Scan to connect</CardTitle>
+            <Badge variant="secondary">
+              {hasConnectionError ? <TriangleAlert data-icon="inline-start" /> : isPreparing ? <Spinner /> : <Radio data-icon="inline-start" />}
+              {hasConnectionError ? "Connection paused" : isPreparing ? "Connecting to relays" : "Waiting for signer"}
+            </Badge>
+            <CardTitle className="mt-3 text-2xl">
+              {hasConnectionError ? "Resume the connection" : isPreparing ? "Preparing a secure connection" : "Scan or tap to connect"}
+            </CardTitle>
             <CardDescription className="max-w-sm text-pretty">
-              Open Amber, nsec.app, or another NIP-46 signer and scan this code.
+              {hasConnectionError
+                ? "The browser could not reach a connection relay. Resume listening, then open your signer again if needed."
+                : "Open your Nostr signer, such as Amber or nsec.app. You can safely switch apps and return here."}
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col items-center gap-5">
-            <a href={nostrConnectURI} className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-foreground/10" aria-label="Open connection in signer">
-              <QRCode value={nostrConnectURI} size={208} />
-            </a>
-            <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />Secure connection in progress</div>
+            {hasConnectionError || isPreparing ? (
+              <div className="rounded-2xl bg-white p-4 opacity-60 shadow-sm ring-1 ring-foreground/10" aria-hidden="true">
+                <QRCode value={nip46URI} size={208} />
+              </div>
+            ) : (
+              <a href={nip46URI} className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-foreground/10" aria-label="Open connection in signer">
+                <QRCode value={nip46URI} size={208} />
+              </a>
+            )}
+            {hasConnectionError ? (
+              <Button className="w-full" onClick={retryNip46Login}>
+                <RefreshCw data-icon="inline-start" />Resume listening
+              </Button>
+            ) : isPreparing ? (
+              <Button className="w-full" disabled>
+                <Spinner data-icon="inline-start" />Connecting to relays
+              </Button>
+            ) : (
+              <Button className="w-full" nativeButton={false} render={<a href={nip46URI} />}>
+                <Smartphone data-icon="inline-start" />Open signer app
+              </Button>
+            )}
+            {!hasConnectionError && !isPreparing && <div className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />Secure connection in progress</div>}
             {error && <Alert variant="destructive"><TriangleAlert /><AlertTitle>Could not connect</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
           </CardContent>
           <CardFooter className="flex-col gap-2 sm:flex-row">
-            <Button className="w-full" onClick={copyToClipboard}>
+            <Button className="w-full" variant="outline" onClick={copyToClipboard}>
               {copied ? <Check data-icon="inline-start" /> : <Copy data-icon="inline-start" />}
-              {copied ? "Copied" : "Copy connection string"}
+              {copied ? "Copied" : "Copy"}
             </Button>
             <Button className="w-full" variant="outline" onClick={handleCancelNip46}>
               <ArrowLeft data-icon="inline-start" />Cancel
@@ -117,7 +158,7 @@ function Login() {
             <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-secondary text-secondary-foreground"><Smartphone /></span>
             <span className="flex min-w-0 flex-1 flex-col gap-1">
               <span className="font-medium">Remote signer</span>
-              <span className="text-sm text-muted-foreground">Amber, nsec.app, or any NIP-46 signer</span>
+              <span className="text-sm text-muted-foreground">Any NIP-46 Nostr signer, including Amber or nsec.app</span>
             </span>
             <Radio className="text-muted-foreground" />
           </Button>
