@@ -14,7 +14,7 @@ function RootLayout() {
   return (
     <div className="min-h-screen">
       <NavBar />
-      <main className="mx-auto max-w-4xl p-4">
+      <main className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
         <Outlet />
       </main>
     </div>

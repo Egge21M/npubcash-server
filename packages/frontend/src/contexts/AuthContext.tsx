@@ -1,436 +1,306 @@
 import {
   createContext,
-  useContext,
-  useState,
   useCallback,
-  useRef,
+  useContext,
   useEffect,
+  useRef,
+  useState,
   type ReactNode,
 } from "react";
-
+import type { Event, EventTemplate } from "nostr-tools";
 import {
-  type Event,
-  type EventTemplate,
-  generateSecretKey,
-  getPublicKey,
-} from "nostr-tools";
-import {
-  BunkerSigner,
-  createNostrConnectURI,
-  type BunkerPointer,
-} from "nostr-tools/nip46";
-import { bytesToHex, hexToBytes } from "nostr-tools/utils";
+  clearPendingNip46Connection,
+  clearStoredNip46Session,
+  createNip46EventSigner,
+  createPendingNip46Connection,
+  endNip46Session,
+  getPendingNip46Connection,
+  getStoredNip46Session,
+  setPendingNip46Connection,
+  setStoredNip46Session,
+  startNip46Handshake,
+  type Nip46Handshake,
+  type Nip46Session,
+  type PendingNip46Connection,
+} from "@/lib/nip46";
 
 type ExtensionConfig = {
   type: "extension";
   pubkey: string;
-  signer: (t: EventTemplate) => Promise<Event>;
+  signer: (template: EventTemplate) => Promise<Event>;
 };
 
 type Nip46Config = {
   type: "nip46";
   pubkey: string;
-  signer: (t: EventTemplate) => Promise<Event>;
-  bunkerSigner: BunkerSigner;
+  signer: (template: EventTemplate) => Promise<Event>;
+  session: Nip46Session;
 };
 
 type NostrConfig = ExtensionConfig | Nip46Config;
 
-type Nip46ConnectionState = "idle" | "awaiting" | "connected" | "error";
+type Nip46ConnectionState =
+  | "idle"
+  | "preparing"
+  | "awaiting"
+  | "connected"
+  | "error";
 
 export interface AuthContextType {
   nostrConfig: NostrConfig | null;
   isAuthenticated: boolean;
-  /** True while restoring a previous session on app load */
-  isRestoring: boolean;
   isLoading: boolean;
   login: () => Promise<void>;
-  /** Initiates NIP-46 login flow and returns the nostrconnect:// URI to display */
   loginWithNip46: (relays?: string[]) => string;
+  retryNip46Login: () => void;
   cancelNip46Login: () => void;
   nip46State: Nip46ConnectionState;
   nip46Error: string | null;
+  nip46URI: string | null;
   logout: () => Promise<void>;
-  /** Clears stored session data and stops any pending restoration */
-  clearSession: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
-
-const CONFIG_KEY = "npc-login";
-const NIP46_CONFIG_KEY = "npc-nip46";
-
-type StoredNip46Config = {
-  clientSecretKey: string; // hex
-  bunkerPointer: BunkerPointer;
-  userPubkey: string;
-};
-
-// Extension storage helpers
-function getStoredExtensionPubkey(): string | null {
-  return localStorage.getItem(CONFIG_KEY);
-}
-
-function setStoredExtensionPubkey(pubkey: string) {
-  localStorage.setItem(CONFIG_KEY, pubkey);
-}
-
-function clearStoredExtensionPubkey() {
-  localStorage.removeItem(CONFIG_KEY);
-}
-
-// NIP-46 storage helpers
-function getStoredNip46Config(): StoredNip46Config | null {
-  const stored = localStorage.getItem(NIP46_CONFIG_KEY);
-  if (!stored) return null;
-  try {
-    return JSON.parse(stored) as StoredNip46Config;
-  } catch {
-    return null;
-  }
-}
-
-function setStoredNip46Config(config: StoredNip46Config) {
-  localStorage.setItem(NIP46_CONFIG_KEY, JSON.stringify(config));
-}
-
-function clearStoredNip46Config() {
-  localStorage.removeItem(NIP46_CONFIG_KEY);
-}
-
-function clearAllStoredConfig() {
-  clearStoredExtensionPubkey();
-  clearStoredNip46Config();
-}
-
-function createExtensionSigner(): (t: EventTemplate) => Promise<Event> {
-  return (t: EventTemplate) => {
-    if (!window.nostr) {
-      return Promise.reject(new Error("Nostr extension not available"));
-    }
-    return window.nostr.signEvent(t);
-  };
-}
-
-// For initial load, we only restore extension config synchronously
-// NIP-46 requires async reconnection, handled separately
-function getInitialExtensionConfig(): ExtensionConfig | null {
-  const storedPubkey = getStoredExtensionPubkey();
-  if (storedPubkey) {
-    return {
-      type: "extension",
-      pubkey: storedPubkey,
-      signer: createExtensionSigner(),
-    };
-  }
-  return null;
-}
-
-async function reconnectNip46(): Promise<Nip46Config | null> {
-  const stored = getStoredNip46Config();
-  if (!stored) return null;
-
-  try {
-    const clientSecretKey = hexToBytes(stored.clientSecretKey);
-    const bunkerSigner = BunkerSigner.fromBunker(
-      clientSecretKey,
-      stored.bunkerPointer
-    );
-
-    // Verify connection is still valid
-    await bunkerSigner.ping();
-
-    return {
-      type: "nip46",
-      pubkey: stored.userPubkey,
-      signer: (t: EventTemplate) => bunkerSigner.signEvent(t),
-      bunkerSigner,
-    };
-  } catch (e) {
-    console.error("Failed to reconnect NIP-46 session:", e);
-    clearStoredNip46Config();
-    return null;
-  }
-}
-
-// Default relays for NIP-46 connections
+const EXTENSION_CONFIG_KEY = "npc-login";
 const DEFAULT_NIP46_RELAYS = [
   "wss://relay.nsec.app",
   "wss://relay.damus.io",
 ];
 
-// Check if we need to restore a session on initial load
-function getInitialState(): {
-  config: NostrConfig | null;
-  isRestoring: boolean;
-} {
-  // First check for extension config (synchronous)
-  const extensionConfig = getInitialExtensionConfig();
-  if (extensionConfig) {
-    return { config: extensionConfig, isRestoring: false };
+function createExtensionSigner() {
+  return (template: EventTemplate) => {
+    if (!window.nostr) {
+      return Promise.reject(new Error("Nostr extension not available"));
+    }
+    return window.nostr.signEvent(template);
+  };
+}
+
+function openNip46AuthChallenge(url: string) {
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
+function createNip46Config(session: Nip46Session): Nip46Config {
+  return {
+    type: "nip46",
+    pubkey: session.userPubkey,
+    session,
+    signer: createNip46EventSigner(session, {
+      onauth: openNip46AuthChallenge,
+    }),
+  };
+}
+
+function getInitialConfig(): NostrConfig | null {
+  const extensionPubkey = localStorage.getItem(EXTENSION_CONFIG_KEY);
+  if (extensionPubkey) {
+    clearPendingNip46Connection();
+    return {
+      type: "extension",
+      pubkey: extensionPubkey,
+      signer: createExtensionSigner(),
+    };
   }
 
-  // Check if there's a stored NIP-46 config that needs async restoration
-  const hasStoredNip46 = getStoredNip46Config() !== null;
-  return { config: null, isRestoring: hasStoredNip46 };
+  const session = getStoredNip46Session();
+  return session ? createNip46Config(session) : null;
+}
+
+function clearAllStoredAuth() {
+  localStorage.removeItem(EXTENSION_CONFIG_KEY);
+  clearStoredNip46Session();
+  clearPendingNip46Connection();
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [initialState] = useState(getInitialState);
-  const [nostrConfig, setNostrConfig] = useState<NostrConfig | null>(
-    initialState.config
+  const [initialConfig] = useState(getInitialConfig);
+  const [initialPending] = useState(() =>
+    initialConfig ? null : getPendingNip46Connection()
   );
-  const [isRestoring, setIsRestoring] = useState(initialState.isRestoring);
+  const [nostrConfig, setNostrConfig] = useState<NostrConfig | null>(
+    initialConfig
+  );
   const [isLoading, setIsLoading] = useState(false);
-  const [nip46State, setNip46State] = useState<Nip46ConnectionState>("idle");
+  const [nip46State, setNip46State] = useState<Nip46ConnectionState>(
+    initialPending ? "preparing" : "idle"
+  );
   const [nip46Error, setNip46Error] = useState<string | null>(null);
+  const [nip46URI, setNip46URI] = useState<string | null>(
+    initialPending?.connectionURI ?? null
+  );
+  const attemptRef = useRef<{
+    id: number;
+    handshake: Nip46Handshake | null;
+  }>({ id: 0, handshake: null });
 
-  // Track pending NIP-46 connection for cancellation
-  // connectionId increments on each new attempt so old attempts can detect they're stale
-  const pendingNip46Ref = useRef<{
-    bunkerSigner: BunkerSigner | null;
-    connectionId: number;
-  }>({ bunkerSigner: null, connectionId: 0 });
+  const stopNip46Attempt = useCallback(() => {
+    attemptRef.current.id += 1;
+    attemptRef.current.handshake?.close();
+    attemptRef.current.handshake = null;
+  }, []);
 
-  // Store connection params for reconnection on visibility change
-  const nip46ConnectionRef = useRef<{
-    clientSecretKey: Uint8Array;
-    connectionURI: string;
-  } | null>(null);
-
-  // Track if restoration was aborted by user
-  const restorationAbortedRef = useRef(false);
-
-  // Attempt to restore NIP-46 session on mount
-  const hasAttemptedNip46Restore = useRef(false);
-  if (!hasAttemptedNip46Restore.current && isRestoring) {
-    hasAttemptedNip46Restore.current = true;
-    reconnectNip46()
-      .then((config) => {
-        // Don't restore if user cleared the session
-        if (config && !restorationAbortedRef.current) {
-          setNostrConfig(config);
-        }
-      })
-      .finally(() => {
-        if (!restorationAbortedRef.current) {
-          setIsRestoring(false);
-        }
+  const startNip46Connection = useCallback(
+    (pending: PendingNip46Connection) => {
+      stopNip46Attempt();
+      const attemptId = attemptRef.current.id;
+      const handshake = startNip46Handshake(pending, {
+        onauth: openNip46AuthChallenge,
       });
-  }
+      attemptRef.current.handshake = handshake;
+      setNip46State("preparing");
+      setNip46Error(null);
+      setNip46URI(pending.connectionURI);
+
+      const isCurrent = () => attemptRef.current.id === attemptId;
+      void (async () => {
+        try {
+          await handshake.ready;
+          if (!isCurrent()) return;
+          setNip46State("awaiting");
+
+          const session = await handshake.connected;
+          if (!isCurrent()) return;
+
+          setStoredNip46Session(session);
+          clearPendingNip46Connection();
+          attemptRef.current.handshake = null;
+          setNostrConfig(createNip46Config(session));
+          setNip46URI(null);
+          setNip46State("connected");
+          setNip46Error(null);
+        } catch (error) {
+          if (!isCurrent()) return;
+          attemptRef.current.handshake = null;
+          const stillPending = getPendingNip46Connection();
+          if (!stillPending) setNip46URI(null);
+          setNip46State("error");
+          setNip46Error(
+            error instanceof Error ? error.message : "Connection failed"
+          );
+          console.error("NIP-46 login failed:", error);
+        }
+      })();
+    },
+    [stopNip46Attempt]
+  );
+
+  useEffect(() => {
+    if (initialPending) startNip46Connection(initialPending);
+  }, [initialPending, startNip46Connection]);
+
+  // Mobile browsers commonly suspend or discard WebSockets when backgrounded.
+  // Recreate the listener from persisted handshake data whenever the page becomes
+  // usable again. Reusing the same client key and secret makes this idempotent,
+  // and relay-stored kind 24133 responses can be received after the app switch.
+  useEffect(() => {
+    const resumePendingHandshake = () => {
+      if (document.visibilityState === "hidden") return;
+      const pending = getPendingNip46Connection();
+      if (pending) startNip46Connection(pending);
+    };
+
+    document.addEventListener("visibilitychange", resumePendingHandshake);
+    window.addEventListener("online", resumePendingHandshake);
+    window.addEventListener("pageshow", resumePendingHandshake);
+    return () => {
+      document.removeEventListener("visibilitychange", resumePendingHandshake);
+      window.removeEventListener("online", resumePendingHandshake);
+      window.removeEventListener("pageshow", resumePendingHandshake);
+    };
+  }, [startNip46Connection]);
+
+  useEffect(() => stopNip46Attempt, [stopNip46Attempt]);
 
   const login = useCallback(async () => {
     setIsLoading(true);
     try {
-      if (!window.nostr) {
-        throw new Error("Nostr extension not available");
-      }
-      const pk = await window.nostr.getPublicKey();
-      setStoredExtensionPubkey(pk);
+      if (!window.nostr) throw new Error("Nostr extension not available");
+      const pubkey = await window.nostr.getPublicKey();
+      stopNip46Attempt();
+      clearAllStoredAuth();
+      localStorage.setItem(EXTENSION_CONFIG_KEY, pubkey);
       setNostrConfig({
         type: "extension",
-        pubkey: pk,
+        pubkey,
         signer: createExtensionSigner(),
       });
-    } catch (e) {
-      console.error("Login failed:", e);
+      setNip46URI(null);
+      setNip46State("idle");
+      setNip46Error(null);
+    } catch (error) {
+      console.error("Login failed:", error);
+      throw error;
     } finally {
       setIsLoading(false);
     }
-  }, []);
-
-  // Start the async NIP-46 connection process
-  const startNip46Connection = useCallback(
-    (clientSecretKey: Uint8Array, connectionURI: string) => {
-      // Increment connection ID and capture it for this attempt
-      const myConnectionId = ++pendingNip46Ref.current.connectionId;
-      pendingNip46Ref.current.bunkerSigner = null;
-
-      // Helper to check if this connection attempt is still current
-      const isStale = () => pendingNip46Ref.current.connectionId !== myConnectionId;
-
-      (async () => {
-        try {
-          // Wait for the bunker to connect
-          // BunkerSigner.fromURI handles subscribing to relays and waiting for the connect response
-          const bunkerSigner = await BunkerSigner.fromURI(
-            clientSecretKey,
-            connectionURI,
-            {
-              onauth: (url) => {
-                // Open auth URL in new window if bunker requires authentication
-                window.open(url, "_blank", "width=600,height=700");
-              },
-            },
-            120000 // 2 minute timeout
-          );
-
-          // Check if this attempt was superseded by a newer one
-          if (isStale()) {
-            await bunkerSigner.close();
-            return;
-          }
-
-          pendingNip46Ref.current.bunkerSigner = bunkerSigner;
-
-          // fromURI already waits for the bunker's connect response,
-          // so we just need to get the user's public key
-          const userPubkey = await bunkerSigner.getPublicKey();
-
-          // Check again if stale
-          if (isStale()) {
-            await bunkerSigner.close();
-            return;
-          }
-
-          // Store the connection info for session restoration
-          const bunkerPointer: BunkerPointer = {
-            pubkey: bunkerSigner.bp.pubkey,
-            relays: bunkerSigner.bp.relays,
-            secret: bunkerSigner.bp.secret,
-          };
-
-          setStoredNip46Config({
-            clientSecretKey: bytesToHex(clientSecretKey),
-            bunkerPointer,
-            userPubkey,
-          });
-
-          const config: Nip46Config = {
-            type: "nip46",
-            pubkey: userPubkey,
-            signer: (t: EventTemplate) => bunkerSigner.signEvent(t),
-            bunkerSigner,
-          };
-
-          // Clear connection params since we're done
-          nip46ConnectionRef.current = null;
-
-          setNostrConfig(config);
-          setNip46State("connected");
-        } catch (e) {
-          // Only show error if this is still the current connection attempt
-          if (!isStale()) {
-            console.error("NIP-46 login failed:", e);
-            setNip46State("error");
-            setNip46Error(e instanceof Error ? e.message : "Connection failed");
-          }
-        }
-      })();
-    },
-    []
-  );
+  }, [stopNip46Attempt]);
 
   const loginWithNip46 = useCallback(
-    (relays: string[] = DEFAULT_NIP46_RELAYS): string => {
-      // Reset state
-      setNip46State("awaiting");
-      setNip46Error(null);
-
-      // Generate a new client keypair for this connection
-      const clientSecretKey = generateSecretKey();
-      const clientPubkey = getPublicKey(clientSecretKey);
-
-      // Generate a random secret for the connection
-      const secret = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
-
-      // Create the nostrconnect:// URI
-      const connectionURI = createNostrConnectURI({
-        clientPubkey,
+    (relays: string[] = DEFAULT_NIP46_RELAYS) => {
+      const pending = createPendingNip46Connection({
         relays,
-        secret,
         name: "npub.cash",
-        perms: ["sign_event"],
+        url: window.location.origin,
       });
-
-      // Store params for reconnection on visibility change
-      nip46ConnectionRef.current = { clientSecretKey, connectionURI };
-
-      // Start the connection
-      startNip46Connection(clientSecretKey, connectionURI);
-
-      return connectionURI;
+      localStorage.removeItem(EXTENSION_CONFIG_KEY);
+      clearStoredNip46Session();
+      setPendingNip46Connection(pending);
+      startNip46Connection(pending);
+      return pending.connectionURI;
     },
     [startNip46Connection]
   );
 
-  // Re-establish NIP-46 connection when browser returns to foreground
-  useEffect(() => {
-    const handleVisibilityChange = () => {
-      if (
-        document.visibilityState === "visible" &&
-        nip46State === "awaiting" &&
-        nip46ConnectionRef.current
-      ) {
-        console.log("Browser foregrounded, re-establishing NIP-46 connection...");
-
-        // Close current bunkerSigner if exists (startNip46Connection will invalidate old attempt via connection ID)
-        if (pendingNip46Ref.current.bunkerSigner) {
-          pendingNip46Ref.current.bunkerSigner.close();
-        }
-
-        // Restart connection with same params
-        const { clientSecretKey, connectionURI } = nip46ConnectionRef.current;
-        startNip46Connection(clientSecretKey, connectionURI);
-      }
-    };
-
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    return () => {
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-    };
-  }, [nip46State, startNip46Connection]);
+  const retryNip46Login = useCallback(() => {
+    const pending = getPendingNip46Connection();
+    if (!pending) {
+      setNip46URI(null);
+      setNip46State("error");
+      setNip46Error("Connection request expired. Start a new remote signer login.");
+      return;
+    }
+    startNip46Connection(pending);
+  }, [startNip46Connection]);
 
   const cancelNip46Login = useCallback(() => {
-    // Increment connection ID to invalidate any pending connection
-    pendingNip46Ref.current.connectionId++;
-    if (pendingNip46Ref.current.bunkerSigner) {
-      pendingNip46Ref.current.bunkerSigner.close();
-    }
-    // Clear connection params to prevent reconnection on visibility change
-    nip46ConnectionRef.current = null;
+    stopNip46Attempt();
+    clearPendingNip46Connection();
+    setNip46URI(null);
     setNip46State("idle");
     setNip46Error(null);
-  }, []);
+  }, [stopNip46Attempt]);
 
   const logout = useCallback(async () => {
     setIsLoading(true);
     try {
-      // Close NIP-46 connection if active
+      stopNip46Attempt();
       if (nostrConfig?.type === "nip46") {
-        await nostrConfig.bunkerSigner.close();
+        await endNip46Session(nostrConfig.session);
       }
-      clearAllStoredConfig();
+      clearAllStoredAuth();
       setNostrConfig(null);
+      setNip46URI(null);
       setNip46State("idle");
+      setNip46Error(null);
     } finally {
       setIsLoading(false);
     }
-  }, [nostrConfig]);
-
-  const clearSession = useCallback(() => {
-    restorationAbortedRef.current = true;
-    clearAllStoredConfig();
-    setNostrConfig(null);
-    setIsRestoring(false);
-    setNip46State("idle");
-    setNip46Error(null);
-  }, []);
+  }, [nostrConfig, stopNip46Attempt]);
 
   return (
     <AuthContext.Provider
       value={{
         nostrConfig,
         isAuthenticated: nostrConfig !== null,
-        isRestoring,
         isLoading,
         login,
         loginWithNip46,
+        retryNip46Login,
         cancelNip46Login,
         nip46State,
         nip46Error,
+        nip46URI,
         logout,
-        clearSession,
       }}
     >
       {children}
@@ -440,8 +310,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
 export function useAuth() {
   const context = useContext(AuthContext);
-  if (!context) {
-    throw new Error("useAuth must be used within an AuthProvider");
-  }
+  if (!context) throw new Error("useAuth must be used within an AuthProvider");
   return context;
 }
