@@ -1,21 +1,43 @@
-# React + TypeScript + Vite + shadcn/ui
+# npub.cash Wallet
 
-This is a template for a new Vite project with React, TypeScript, and shadcn/ui.
+The Claim Companion is a React 19, TypeScript, Vite, Tailwind CSS v4, and
+shadcn/ui application. Its browser storage belongs to the dedicated
+`wallet.npub.cash` origin.
 
-## Adding components
-
-To add components to your app, run the following command:
+## Run from the repository root
 
 ```bash
-npx shadcn@latest add button
+bun install --frozen-lockfile
+bun run wallet:dev
+bun run wallet:typecheck
+bun run wallet:lint
+bun run wallet:test
+bun run wallet:test:browser
+bun run wallet:build
 ```
 
-This will place the ui components in the `src/components` directory.
+The Coco RC and npub.cash plugin versions are an exact compatibility tuple.
+Update them together according to `docs/adr/0001-pin-coco-v2-rc-and-npc-nightly.md`.
 
-## Using components
+## Browser environment
 
-To use the components in your app, import them as follows:
+Copy `.env.example` to `.env.local` when overriding local defaults.
 
-```tsx
-import { Button } from "@/components/ui/button"
+- `VITE_NPUBCASH_API_ORIGIN` is the public HTTPS npub.cash API origin. HTTP is
+  accepted only for localhost development.
+- `VITE_NIP46_RELAYS` is a comma-separated list of secure `wss://` relay URLs
+  reserved for the later NIP-46 signer slice.
+
+Secrets, signer credentials, Recovery Phrases, proofs, and encoded tokens must
+never be placed in Vite environment variables.
+
+## shadcn/ui
+
+Use the repository's shadcn skill and Bun runner before adding or using an
+official component:
+
+```bash
+bunx --bun shadcn@latest info --json
+bunx --bun shadcn@latest docs button
+bunx --bun shadcn@latest add @shadcn/button
 ```

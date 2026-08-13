@@ -7,7 +7,13 @@
     "build": "bun run --filter '*' build",
     "dev": "bun run --filter '!@npubcash-env' dev",
     "setup": "node dist/env/index.js",
-    "start": "NODE_ENV=development bun run --filter '@npubcash/server' start"
+    "start": "NODE_ENV=development bun run --filter '@npubcash/server' start",
+    "wallet:dev": "bun run --cwd packages/wallet dev",
+    "wallet:typecheck": "bun run --cwd packages/wallet typecheck",
+    "wallet:lint": "bun run --cwd packages/wallet lint",
+    "wallet:test": "bun run --cwd packages/wallet test",
+    "wallet:test:browser": "bun run --cwd packages/wallet test:browser",
+    "wallet:build": "bun run --cwd packages/wallet build"
   },
   "devDependencies": {
     "@flydotio/dockerfile": "^0.7.10",

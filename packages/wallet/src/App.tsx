@@ -1,21 +1,35 @@
-import { Button } from "@/components/ui/button"
+import { createBrowserRouter, RouterProvider } from "react-router-dom"
+
+import { WalletRuntimeProvider } from "@/wallet/wallet-runtime-provider"
+import {
+  AuthenticatedLayout,
+  HomeRoute,
+  RecoveryPage,
+  RouteErrorPage,
+  SettingsPage,
+  WalletPage,
+} from "@/wallet/wallet-screens"
+
+const router = createBrowserRouter([
+  {
+    element: <WalletRuntimeProvider />,
+    errorElement: <RouteErrorPage />,
+    children: [
+      { path: "/", element: <HomeRoute /> },
+      {
+        element: <AuthenticatedLayout />,
+        children: [
+          { path: "/wallet", element: <WalletPage /> },
+          { path: "/settings", element: <SettingsPage /> },
+          { path: "/settings/recovery", element: <RecoveryPage /> },
+        ],
+      },
+    ],
+  },
+])
 
 export function App() {
-  return (
-    <div className="flex min-h-svh p-6">
-      <div className="flex max-w-md min-w-0 flex-col gap-4 text-sm leading-loose">
-        <div>
-          <h1 className="font-medium">Project ready!</h1>
-          <p>You may now add components and start building.</p>
-          <p>We&apos;ve already added the button component for you.</p>
-          <Button className="mt-2">Button</Button>
-        </div>
-        <div className="font-mono text-xs text-muted-foreground">
-          (Press <kbd>d</kbd> to toggle dark mode)
-        </div>
-      </div>
-    </div>
-  )
+  return <RouterProvider router={router} />
 }
 
 export default App
