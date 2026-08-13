@@ -111,6 +111,7 @@
         "clsx": "^2.1.1",
         "coco-cashu-plugin-npc": "3.0.0-rc.20260707.3.1.sha.debd5dd",
         "lucide-react": "^1.31.0",
+        "nostr-tools": "2.19.4",
         "react": "^19.2.6",
         "react-dom": "^19.2.6",
         "react-router-dom": "7.18.2",

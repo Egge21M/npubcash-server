@@ -8,7 +8,8 @@ interface RemovableSignerRecord {
 
 export async function forgetWalletSession(
   runtime: ClosableWalletRuntime | null,
-  signerVault: RemovableSignerRecord
+  signerVault: RemovableSignerRecord,
+  clearRuntimeSigner: () => void = () => undefined
 ): Promise<void> {
   try {
     await runtime?.close()
@@ -17,5 +18,9 @@ export async function forgetWalletSession(
     // forget the signer even when a Manager cleanup reports an error.
   }
 
-  await signerVault.removeActive()
+  try {
+    await signerVault.removeActive()
+  } finally {
+    clearRuntimeSigner()
+  }
 }

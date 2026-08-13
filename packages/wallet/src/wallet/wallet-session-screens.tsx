@@ -1,5 +1,10 @@
-import { CircleAlertIcon, KeyRoundIcon, ShieldAlertIcon } from "lucide-react"
-import { useEffect, useState } from "react"
+import {
+  ChevronDownIcon,
+  CircleAlertIcon,
+  KeyRoundIcon,
+  ShieldAlertIcon,
+} from "lucide-react"
+import { useEffect, useState, type FormEvent } from "react"
 import { Navigate } from "react-router-dom"
 
 import {
@@ -23,9 +28,25 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible"
+import {
+  Field,
+  FieldDescription,
+  FieldError,
+  FieldGroup,
+  FieldLabel,
+} from "@/components/ui/field"
+import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { cn } from "@/lib/utils"
+import { openDirectNsec } from "@/signer/direct-nsec"
+import { MINIMUM_SIGNER_PASSPHRASE_LENGTH } from "@/signer/signer-vault"
+import { secondsUntilUnlock } from "@/signer/unlock-rate-limit"
 import {
   type InitializationStage,
   useWalletRuntime,
@@ -114,8 +135,49 @@ export function InitializationPage({ stage }: { stage: InitializationStage }) {
 }
 
 function SignInPage() {
-  const { extensionAvailable, signInWithNip07 } = useWalletRuntime()
+  const { extensionAvailable, signInWithDirectNsec, signInWithNip07 } =
+    useWalletRuntime()
   const storageWarning = useStorageDurabilityWarning()
+  const [nsec, setNsec] = useState("")
+  const [passphrase, setPassphrase] = useState("")
+  const [confirmation, setConfirmation] = useState("")
+  const [setupState, setSetupState] = useState<
+    | { status: "idle" }
+    | { status: "submitting" }
+    | { status: "failed"; message: string }
+  >({ status: "idle" })
+  const [errors, setErrors] = useState<{
+    nsec?: string
+    passphrase?: string
+    confirmation?: string
+  }>({})
+
+  const submitDirectNsec = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const nextErrors: typeof errors = {}
+
+    try {
+      const signer = openDirectNsec(nsec)
+      signer.destroy()
+    } catch {
+      nextErrors.nsec = "Enter a valid nsec Identity Secret."
+    }
+    if (passphrase.length < MINIMUM_SIGNER_PASSPHRASE_LENGTH) {
+      nextErrors.passphrase = `Use at least ${MINIMUM_SIGNER_PASSPHRASE_LENGTH} characters.`
+    }
+    if (confirmation !== passphrase) {
+      nextErrors.confirmation = "The passphrases do not match."
+    }
+
+    setErrors(nextErrors)
+    if (Object.keys(nextErrors).length > 0) return
+
+    setSetupState({ status: "submitting" })
+    const result = await signInWithDirectNsec(nsec, passphrase)
+    if (!result.ok) {
+      setSetupState({ status: "failed", message: result.message })
+    }
+  }
 
   return (
     <PageFrame>
@@ -131,10 +193,10 @@ function SignInPage() {
         <CardHeader>
           <CardTitle>Sign in with Nostr</CardTitle>
           <CardDescription>
-            Your browser extension confirms which local Wallet to open.
+            Your active signer confirms which local Wallet to open.
           </CardDescription>
         </CardHeader>
-        <CardContent>
+        <CardContent className="flex flex-col gap-4">
           <Button
             className="w-full"
             disabled={!extensionAvailable}
@@ -149,10 +211,116 @@ function SignInPage() {
               update.
             </p>
           )}
+
+          <Collapsible>
+            <CollapsibleTrigger
+              render={<Button variant="ghost" className="w-full" />}
+            >
+              Use an nsec
+              <ChevronDownIcon data-icon="inline-end" />
+            </CollapsibleTrigger>
+            <CollapsibleContent className="pt-4">
+              <div className="flex flex-col gap-4">
+                <Alert>
+                  <ShieldAlertIcon />
+                  <AlertTitle>
+                    Your nsec controls your Nostr identity
+                  </AlertTitle>
+                  <AlertDescription>
+                    It is encrypted in this browser with your passphrase. The
+                    passphrase does not encrypt locally held ecash or Wallet
+                    history. Never send either value to npub.cash support.
+                  </AlertDescription>
+                </Alert>
+
+                <form
+                  className="flex flex-col gap-5"
+                  onSubmit={(event) => void submitDirectNsec(event)}
+                >
+                  <FieldGroup>
+                    <Field data-invalid={Boolean(errors.nsec)}>
+                      <FieldLabel htmlFor="direct-nsec">nsec</FieldLabel>
+                      <Input
+                        aria-invalid={Boolean(errors.nsec)}
+                        autoCapitalize="none"
+                        autoComplete="off"
+                        id="direct-nsec"
+                        onChange={(event) => setNsec(event.target.value)}
+                        spellCheck={false}
+                        type="password"
+                        value={nsec}
+                      />
+                      <FieldDescription>
+                        The Identity Secret is encrypted before it is saved.
+                      </FieldDescription>
+                      <FieldError>{errors.nsec}</FieldError>
+                    </Field>
+
+                    <Field data-invalid={Boolean(errors.passphrase)}>
+                      <FieldLabel htmlFor="direct-passphrase">
+                        Passphrase
+                      </FieldLabel>
+                      <Input
+                        aria-invalid={Boolean(errors.passphrase)}
+                        autoComplete="new-password"
+                        id="direct-passphrase"
+                        onChange={(event) => setPassphrase(event.target.value)}
+                        type="password"
+                        value={passphrase}
+                      />
+                      <FieldDescription>
+                        Use {MINIMUM_SIGNER_PASSPHRASE_LENGTH} or more
+                        characters. You will enter it after every reload.
+                      </FieldDescription>
+                      <FieldError>{errors.passphrase}</FieldError>
+                    </Field>
+
+                    <Field data-invalid={Boolean(errors.confirmation)}>
+                      <FieldLabel htmlFor="direct-passphrase-confirmation">
+                        Confirm passphrase
+                      </FieldLabel>
+                      <Input
+                        aria-invalid={Boolean(errors.confirmation)}
+                        autoComplete="new-password"
+                        id="direct-passphrase-confirmation"
+                        onChange={(event) =>
+                          setConfirmation(event.target.value)
+                        }
+                        type="password"
+                        value={confirmation}
+                      />
+                      <FieldError>{errors.confirmation}</FieldError>
+                    </Field>
+                  </FieldGroup>
+
+                  {setupState.status === "failed" && (
+                    <Alert variant="destructive">
+                      <CircleAlertIcon />
+                      <AlertTitle>Signer could not be saved</AlertTitle>
+                      <AlertDescription>{setupState.message}</AlertDescription>
+                    </Alert>
+                  )}
+
+                  <Button
+                    disabled={setupState.status === "submitting"}
+                    type="submit"
+                  >
+                    {setupState.status === "submitting" && (
+                      <Spinner data-icon="inline-start" />
+                    )}
+                    {setupState.status === "submitting"
+                      ? "Protecting signer…"
+                      : "Protect and open Wallet"}
+                  </Button>
+                </form>
+              </div>
+            </CollapsibleContent>
+          </Collapsible>
         </CardContent>
         <CardFooter>
           <p className="text-xs text-muted-foreground">
-            The extension&apos;s private key never enters npub.cash.
+            Signer credentials stay in this browser and are never sent to
+            npub.cash.
           </p>
         </CardFooter>
       </Card>
@@ -187,7 +355,11 @@ export function FailurePage() {
 
   if (state.phase !== "failed") return null
 
-  const canRetry = state.kind !== "missing-wallet-seed"
+  const canRetry = ![
+    "missing-wallet-seed",
+    "signer-record-corrupt",
+    "signer-record-unsupported",
+  ].includes(state.kind)
 
   return (
     <PageFrame>
@@ -234,6 +406,129 @@ export function FailurePage() {
   )
 }
 
+export function DirectNsecUnlockPage() {
+  const { state, unlockDirectNsec, forgetDirectNsec } = useWalletRuntime()
+  const [passphrase, setPassphrase] = useState("")
+  const [now, setNow] = useState(() => Date.now())
+  const retryAt =
+    state.phase === "direct-nsec-unlock" ? (state.retryAt ?? 0) : 0
+
+  useEffect(() => {
+    if (retryAt <= now) return
+    const timer = window.setInterval(() => setNow(Date.now()), 250)
+    return () => window.clearInterval(timer)
+  }, [now, retryAt])
+
+  if (state.phase !== "direct-nsec-unlock") return null
+
+  const pending = state.status === "decrypting"
+  const forgetting = state.status === "forgetting"
+  const failed = state.status === "failed"
+  const retrySeconds = secondsUntilUnlock(retryAt, now)
+  const rateLimited = retrySeconds > 0
+
+  return (
+    <PageFrame>
+      <div className="flex flex-col gap-2 text-center">
+        <p className="text-sm font-medium text-primary">npub.cash</p>
+        <h1 className="text-3xl font-semibold tracking-tight">
+          Unlock your signer
+        </h1>
+        <p className="text-muted-foreground">
+          Enter the passphrase for this browser session.
+        </p>
+      </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Direct nsec signer</CardTitle>
+          <CardDescription>
+            Verifying {state.expectedPublicKey.slice(0, 12)}… before opening its
+            local Wallet.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form
+            className="flex flex-col gap-5"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void unlockDirectNsec(passphrase)
+            }}
+          >
+            <FieldGroup>
+              <Field
+                data-disabled={pending || forgetting}
+                data-invalid={failed}
+              >
+                <FieldLabel htmlFor="unlock-passphrase">Passphrase</FieldLabel>
+                <Input
+                  aria-invalid={failed}
+                  autoComplete="current-password"
+                  autoFocus
+                  disabled={pending || forgetting}
+                  id="unlock-passphrase"
+                  onChange={(event) => setPassphrase(event.target.value)}
+                  type="password"
+                  value={passphrase}
+                />
+                <FieldError>{state.message}</FieldError>
+              </Field>
+            </FieldGroup>
+            <Button
+              disabled={
+                pending || forgetting || rateLimited || passphrase.length === 0
+              }
+              type="submit"
+            >
+              {pending && <Spinner data-icon="inline-start" />}
+              {pending
+                ? "Decrypting signer…"
+                : rateLimited
+                  ? `Try again in ${retrySeconds}s`
+                  : "Unlock Wallet"}
+            </Button>
+          </form>
+        </CardContent>
+        <CardFooter>
+          <p className="text-xs text-muted-foreground">
+            The decrypted Identity Secret stays in runtime memory only until
+            Sign Out or this page closes. Brief pauses limit attempts on this
+            page, but cannot prevent offline guessing of a copied signer record.
+          </p>
+        </CardFooter>
+      </Card>
+
+      <AlertDialog>
+        <AlertDialogTrigger render={<Button variant="ghost" />}>
+          Forgot passphrase
+        </AlertDialogTrigger>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Forget encrypted signer?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This removes only the encrypted direct-nsec signer record. It does
+              not delete the Wallet seed, Coco database, proofs, history, or
+              other Wallet Material. Enter the same nsec again to reopen this
+              Wallet Installation with a new passphrase.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={forgetting}
+              variant="destructive"
+              onClick={() => void forgetDirectNsec()}
+            >
+              {forgetting && <Spinner data-icon="inline-start" />}
+              Forget signer
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </PageFrame>
+  )
+}
+
 export function NewWalletWarningPage() {
   const { continueOpeningWallet } = useWalletRuntime()
 
@@ -272,6 +567,9 @@ export function HomeRoute() {
     return <InitializationPage stage={state.stage} />
   }
   if (state.phase === "new-wallet-warning") return <NewWalletWarningPage />
+  if (state.phase === "direct-nsec-unlock") {
+    return <DirectNsecUnlockPage />
+  }
   if (state.phase === "failed") return <FailurePage />
   return <SignInPage />
 }

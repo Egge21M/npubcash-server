@@ -41,7 +41,9 @@ import { cn } from "@/lib/utils"
 import { useWalletRuntime } from "./wallet-runtime-context"
 
 export function SettingsPage() {
-  const { signOut } = useWalletRuntime()
+  const { signOut, state } = useWalletRuntime()
+
+  if (state.phase !== "open") return null
 
   return (
     <>
@@ -72,7 +74,11 @@ export function SettingsPage() {
           </ItemMedia>
           <ItemContent>
             <ItemTitle>Nostr Signer</ItemTitle>
-            <ItemDescription>NIP-07 browser extension</ItemDescription>
+            <ItemDescription>
+              {state.signerMode === "nip07"
+                ? "NIP-07 browser extension"
+                : "Direct nsec, encrypted at rest"}
+            </ItemDescription>
           </ItemContent>
         </Item>
       </ItemGroup>

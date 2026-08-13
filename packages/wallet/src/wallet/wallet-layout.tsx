@@ -5,6 +5,7 @@ import { buttonVariants } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { useWalletRuntime } from "./wallet-runtime-context"
 import {
+  DirectNsecUnlockPage,
   FailurePage,
   InitializationPage,
   NewWalletWarningPage,
@@ -78,6 +79,9 @@ export function AuthenticatedLayout() {
     return <InitializationPage stage={state.stage} />
   }
   if (state.phase === "new-wallet-warning") return <NewWalletWarningPage />
+  if (state.phase === "direct-nsec-unlock") {
+    return <DirectNsecUnlockPage />
+  }
   if (state.phase === "failed") return <FailurePage />
   if (state.phase === "signed-out") return <Navigate replace to="/" />
   return <AppShell />

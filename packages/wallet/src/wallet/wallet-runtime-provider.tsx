@@ -9,7 +9,11 @@ import {
   Nip07SignerAdapter,
   Nip07UnavailableError,
 } from "@/signer/nip07"
-import { SignerVault } from "@/signer/signer-vault"
+import { DirectNsecSignerAdapter } from "@/signer/direct-nsec"
+import { DirectNsecUnlockError } from "@/signer/signer-envelope"
+import { classifySignerRecordFailure } from "@/signer/signer-record-failure"
+import { SignerVault, type DirectNsecSignerRecord } from "@/signer/signer-vault"
+import { nextUnlockRetryAt } from "@/signer/unlock-rate-limit"
 import {
   MissingWalletSeedError,
   WalletRegistry,
@@ -21,6 +25,7 @@ import {
   WalletRuntimeContext,
   type WalletRuntimeContextValue,
   type WalletSessionState,
+  type SignerMode,
 } from "./wallet-runtime-context"
 
 const signerVault = new SignerVault()
@@ -45,7 +50,21 @@ export function WalletRuntimeProvider() {
     () => findNip07Provider() !== null
   )
   const runtimeRef = useRef<WalletRuntime | null>(null)
+  const directSignerRef = useRef<DirectNsecSignerAdapter | null>(null)
+  const pendingDirectRecordRef = useRef<DirectNsecSignerRecord | null>(null)
   const activeOpenRef = useRef<Promise<void> | null>(null)
+  const failedDirectUnlockAttemptsRef = useRef(0)
+  const directUnlockRetryAtRef = useRef(0)
+
+  const clearDirectSigner = useCallback(() => {
+    directSignerRef.current?.destroy()
+    directSignerRef.current = null
+  }, [])
+
+  const resetDirectUnlockRateLimit = useCallback(() => {
+    failedDirectUnlockAttemptsRef.current = 0
+    directUnlockRetryAtRef.current = 0
+  }, [])
 
   const refreshExtensionAvailability = useCallback(() => {
     const available = findNip07Provider() !== null
@@ -63,42 +82,45 @@ export function WalletRuntimeProvider() {
     return () => window.clearInterval(timer)
   }, [extensionAvailable, refreshExtensionAvailability])
 
-  const startRuntime = useCallback(async (installation: WalletInstallation) => {
-    setState({ phase: "initializing", stage: "starting-coco" })
-    let runtime: WalletRuntime | null = null
+  const startRuntime = useCallback(
+    async (installation: WalletInstallation, signerMode: SignerMode) => {
+      setState({ phase: "initializing", stage: "starting-coco" })
+      let runtime: WalletRuntime | null = null
 
-    try {
-      await nextRenderOpportunity()
-      runtime = await openWalletRuntime(installation)
+      try {
+        await nextRenderOpportunity()
+        runtime = await openWalletRuntime(installation)
 
-      // initializeCoco has now initialized the production NPC plugin boundary.
-      // Adding an authenticated account and syncing claims remains Slice 4.
-      flushSync(() => {
-        setState({ phase: "initializing", stage: "connecting-npubcash" })
-      })
-      await nextRenderOpportunity()
+        // initializeCoco has now initialized the production NPC plugin boundary.
+        // Adding an authenticated account and syncing claims remains Slice 4.
+        flushSync(() => {
+          setState({ phase: "initializing", stage: "connecting-npubcash" })
+        })
+        await nextRenderOpportunity()
 
-      flushSync(() => {
-        setState({ phase: "initializing", stage: "checking-payments" })
-      })
-      runtime.npubCashAccountCount()
-      await nextRenderOpportunity()
+        flushSync(() => {
+          setState({ phase: "initializing", stage: "checking-payments" })
+        })
+        runtime.npubCashAccountCount()
+        await nextRenderOpportunity()
 
-      runtimeRef.current = runtime
-      setState({ phase: "open", installation, runtime })
-    } catch (error) {
-      await runtime?.close().catch(() => undefined)
-      setState({
-        phase: "failed",
-        kind: "runtime-failed",
-        message: errorMessage(error),
-        publicKey: installation.publicKey,
-      })
-    }
-  }, [])
+        runtimeRef.current = runtime
+        setState({ phase: "open", installation, runtime, signerMode })
+      } catch (error) {
+        await runtime?.close().catch(() => undefined)
+        setState({
+          phase: "failed",
+          kind: "runtime-failed",
+          message: errorMessage(error),
+          publicKey: installation.publicKey,
+        })
+      }
+    },
+    []
+  )
 
   const openForPublicKey = useCallback(
-    async (publicKey: string) => {
+    async (publicKey: string, signerMode: SignerMode) => {
       setState({ phase: "initializing", stage: "opening-wallet" })
 
       let installation: WalletInstallation
@@ -124,21 +146,49 @@ export function WalletRuntimeProvider() {
       }
 
       if (installation.condition === "created") {
-        setState({ phase: "new-wallet-warning", installation })
+        setState({
+          phase: "new-wallet-warning",
+          installation,
+          signerMode,
+        })
         return
       }
 
-      await startRuntime(installation)
+      await startRuntime(installation, signerMode)
     },
     [startRuntime]
   )
 
   const restore = useCallback(async () => {
+    clearDirectSigner()
+    resetDirectUnlockRateLimit()
+    pendingDirectRecordRef.current = null
     setState({ phase: "initializing", stage: "restoring-session" })
-    const signerRecord = await signerVault.getActive()
+    let signerRecord
+    try {
+      signerRecord = await signerVault.getActive()
+    } catch (error) {
+      const failure = classifySignerRecordFailure(error)
+      setState({
+        phase: "failed",
+        kind: failure.kind,
+        message: failure.message,
+      })
+      return
+    }
 
     if (!signerRecord) {
       setState({ phase: "signed-out" })
+      return
+    }
+
+    if (signerRecord.mode === "direct-nsec") {
+      pendingDirectRecordRef.current = signerRecord
+      setState({
+        phase: "direct-nsec-unlock",
+        expectedPublicKey: signerRecord.expectedPublicKey,
+        status: "waiting",
+      })
       return
     }
 
@@ -161,7 +211,7 @@ export function WalletRuntimeProvider() {
       const publicKey = await new Nip07SignerAdapter(provider).open(
         signerRecord.expectedPublicKey
       )
-      await openForPublicKey(publicKey)
+      await openForPublicKey(publicKey, "nip07")
     } catch (error) {
       if (error instanceof Nip07PublicKeyMismatchError) {
         setState({
@@ -181,7 +231,7 @@ export function WalletRuntimeProvider() {
         publicKey: signerRecord.expectedPublicKey,
       })
     }
-  }, [openForPublicKey])
+  }, [clearDirectSigner, openForPublicKey, resetDirectUnlockRateLimit])
 
   const runOneOpen = useCallback((operation: () => Promise<void>) => {
     activeOpenRef.current ??= operation().finally(() => {
@@ -202,7 +252,7 @@ export function WalletRuntimeProvider() {
         try {
           const publicKey = await new Nip07SignerAdapter(provider).open()
           await signerVault.saveNip07(publicKey)
-          await openForPublicKey(publicKey)
+          await openForPublicKey(publicKey, "nip07")
         } catch (error) {
           setState({
             phase: "failed",
@@ -217,28 +267,144 @@ export function WalletRuntimeProvider() {
     [openForPublicKey, runOneOpen]
   )
 
+  const signInWithDirectNsec = useCallback(
+    async (nsec: string, passphrase: string) => {
+      let result: { ok: true } | { ok: false; message: string } = { ok: true }
+
+      await runOneOpen(async () => {
+        try {
+          const signer = await signerVault.saveDirectNsec(nsec, passphrase)
+          clearDirectSigner()
+          directSignerRef.current = signer
+          pendingDirectRecordRef.current = null
+          await openForPublicKey(signer.publicKey, "direct-nsec")
+        } catch (error) {
+          result = { ok: false, message: errorMessage(error) }
+        }
+      })
+
+      return result
+    },
+    [clearDirectSigner, openForPublicKey, runOneOpen]
+  )
+
+  const unlockDirectNsec = useCallback(
+    (passphrase: string) =>
+      runOneOpen(async () => {
+        const record = pendingDirectRecordRef.current
+        if (!record) {
+          await restore()
+          return
+        }
+
+        const now = Date.now()
+        if (now < directUnlockRetryAtRef.current) {
+          setState({
+            phase: "direct-nsec-unlock",
+            expectedPublicKey: record.expectedPublicKey,
+            status: "failed",
+            message:
+              "The passphrase or encrypted signer record could not be verified.",
+            retryAt: directUnlockRetryAtRef.current,
+          })
+          return
+        }
+
+        setState({
+          phase: "direct-nsec-unlock",
+          expectedPublicKey: record.expectedPublicKey,
+          status: "decrypting",
+        })
+
+        try {
+          const signer = await signerVault.unlockDirectNsec(record, passphrase)
+          resetDirectUnlockRateLimit()
+          clearDirectSigner()
+          directSignerRef.current = signer
+          await openForPublicKey(signer.publicKey, "direct-nsec")
+        } catch (error) {
+          if (error instanceof DirectNsecUnlockError) {
+            failedDirectUnlockAttemptsRef.current += 1
+            directUnlockRetryAtRef.current = nextUnlockRetryAt(
+              failedDirectUnlockAttemptsRef.current
+            )
+            setState({
+              phase: "direct-nsec-unlock",
+              expectedPublicKey: record.expectedPublicKey,
+              status: "failed",
+              message: error.message,
+              retryAt: directUnlockRetryAtRef.current,
+            })
+            return
+          }
+
+          const failure = classifySignerRecordFailure(error)
+          setState({
+            phase: "failed",
+            kind: failure.kind,
+            message: failure.message,
+            publicKey: record.expectedPublicKey,
+          })
+        }
+      }),
+    [
+      clearDirectSigner,
+      openForPublicKey,
+      resetDirectUnlockRateLimit,
+      restore,
+      runOneOpen,
+    ]
+  )
+
+  const forgetDirectNsec = useCallback(async () => {
+    const record = pendingDirectRecordRef.current
+    if (record) {
+      setState({
+        phase: "direct-nsec-unlock",
+        expectedPublicKey: record.expectedPublicKey,
+        status: "forgetting",
+      })
+    }
+
+    try {
+      await signerVault.removeActive()
+      pendingDirectRecordRef.current = null
+      resetDirectUnlockRateLimit()
+      clearDirectSigner()
+      setState({ phase: "signed-out" })
+    } catch (error) {
+      setState({
+        phase: "failed",
+        kind: "runtime-failed",
+        message: errorMessage(error),
+        publicKey: record?.expectedPublicKey,
+      })
+    }
+  }, [clearDirectSigner, resetDirectUnlockRateLimit])
+
   const signOut = useCallback(async () => {
     const runtime = runtimeRef.current
     runtimeRef.current = null
     try {
-      await forgetWalletSession(runtime, signerVault)
+      await forgetWalletSession(runtime, signerVault, clearDirectSigner)
     } finally {
+      pendingDirectRecordRef.current = null
+      resetDirectUnlockRateLimit()
       setState({ phase: "signed-out" })
     }
-  }, [])
+  }, [clearDirectSigner, resetDirectUnlockRateLimit])
 
   const continueOpeningWallet = useCallback(() => {
     if (state.phase !== "new-wallet-warning") return Promise.resolve()
-    return runOneOpen(() => startRuntime(state.installation))
+    return runOneOpen(() => startRuntime(state.installation, state.signerMode))
   }, [runOneOpen, startRuntime, state])
 
   const removeStrandedWallet = useCallback(async () => {
     if (state.phase !== "failed" || !state.publicKey) return
 
     await walletRegistry.remove(state.publicKey)
-    await signerVault.removeActive()
-    setState({ phase: "signed-out" })
-  }, [state])
+    await signOut()
+  }, [signOut, state])
 
   useEffect(() => {
     void runOneOpen(restore)
@@ -246,15 +412,19 @@ export function WalletRuntimeProvider() {
     return () => {
       const runtime = runtimeRef.current
       runtimeRef.current = null
+      clearDirectSigner()
       void runtime?.close()
     }
-  }, [restore, runOneOpen])
+  }, [clearDirectSigner, restore, runOneOpen])
 
   const value = useMemo<WalletRuntimeContextValue>(
     () => ({
       state,
       extensionAvailable,
       signInWithNip07,
+      signInWithDirectNsec,
+      unlockDirectNsec,
+      forgetDirectNsec,
       continueOpeningWallet,
       retry: () => runOneOpen(restore),
       signOut,
@@ -267,8 +437,11 @@ export function WalletRuntimeProvider() {
       restore,
       runOneOpen,
       signInWithNip07,
+      signInWithDirectNsec,
       signOut,
       state,
+      unlockDirectNsec,
+      forgetDirectNsec,
     ]
   )
 

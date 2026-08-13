@@ -2,6 +2,15 @@ import { expect, test, type Page } from "@playwright/test"
 
 const PUBLIC_KEY_A = "a".repeat(64)
 const PUBLIC_KEY_B = "b".repeat(64)
+const DIRECT_PUBLIC_KEY =
+  "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+const DIRECT_NSEC =
+  "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsmhltgl"
+const DIRECT_PASSPHRASE = "correct horse battery staple"
+const OTHER_DIRECT_PUBLIC_KEY =
+  "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+const OTHER_DIRECT_NSEC =
+  "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqpqptcfk2"
 
 async function installNip07(page: Page, publicKey = PUBLIC_KEY_A) {
   await page.addInitScript((initialPublicKey) => {
@@ -32,6 +41,17 @@ async function signIn(page: Page) {
   await finishOpening(page)
   await expect(page).toHaveURL(/\/wallet$/)
   await expect(page.getByText("0 sat", { exact: true })).toBeVisible()
+}
+
+async function signInWithNsec(page: Page) {
+  await page.goto("/")
+  await page.getByRole("button", { name: "Use an nsec" }).click()
+  await page.getByLabel("nsec").fill(DIRECT_NSEC)
+  await page.getByLabel("Passphrase", { exact: true }).fill(DIRECT_PASSPHRASE)
+  await page.getByLabel("Confirm passphrase").fill(DIRECT_PASSPHRASE)
+  await page.getByRole("button", { name: "Protect and open Wallet" }).click()
+  await finishOpening(page)
+  await expect(page).toHaveURL(/\/wallet$/)
 }
 
 async function finishOpening(page: Page) {
@@ -78,6 +98,221 @@ async function deleteDatabase(page: Page, name: string) {
     })
   }, name)
 }
+
+async function readSignerRecord(page: Page) {
+  return page.evaluate(async () => {
+    const request = indexedDB.open("npubcash-signer-vault")
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      request.onsuccess = () => resolve(request.result)
+      request.onerror = () => reject(request.error)
+    })
+    const transaction = database.transaction("records", "readonly")
+    const recordRequest = transaction.objectStore("records").get("active")
+    const record = await new Promise<unknown>((resolve, reject) => {
+      recordRequest.onsuccess = () => resolve(recordRequest.result)
+      recordRequest.onerror = () => reject(recordRequest.error)
+    })
+    database.close()
+    return record ?? null
+  })
+}
+
+async function writeSignerRecord(page: Page, record: unknown) {
+  await page.evaluate(async (value) => {
+    const request = indexedDB.open("npubcash-signer-vault", 1)
+    request.onupgradeneeded = () => request.result.createObjectStore("records")
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      request.onsuccess = () => resolve(request.result)
+      request.onerror = () => reject(request.error)
+    })
+    const transaction = database.transaction("records", "readwrite")
+    transaction.objectStore("records").put(value, "active")
+    await new Promise<void>((resolve, reject) => {
+      transaction.oncomplete = () => resolve()
+      transaction.onerror = () => reject(transaction.error)
+    })
+    database.close()
+  }, record)
+}
+
+test("direct-nsec setup reports field-specific validation", async ({
+  page,
+}) => {
+  await page.goto("/")
+  await page.getByRole("button", { name: "Use an nsec" }).click()
+  await page.getByLabel("nsec").fill("not-an-nsec")
+  await page.getByLabel("Passphrase", { exact: true }).fill("too short")
+  await page.getByLabel("Confirm passphrase").fill("different")
+  await page.getByRole("button", { name: "Protect and open Wallet" }).click()
+
+  await expect(
+    page.getByText("Enter a valid nsec Identity Secret.")
+  ).toBeVisible()
+  await expect(page.getByText("Use at least 12 characters.")).toBeVisible()
+  await expect(page.getByText("The passphrases do not match.")).toBeVisible()
+  await expect(page.getByLabel("nsec")).toHaveAttribute("aria-invalid", "true")
+})
+
+test("direct nsec is encrypted at rest and requires unlock after reload", async ({
+  page,
+}) => {
+  await signInWithNsec(page)
+  const installation = await readInstallation(page, DIRECT_PUBLIC_KEY)
+
+  const signerRecordText = JSON.stringify(await readSignerRecord(page))
+  expect(signerRecordText).not.toContain(DIRECT_NSEC)
+  expect(signerRecordText).not.toContain(DIRECT_PASSPHRASE)
+
+  await page.reload()
+  await expect(
+    page.getByRole("heading", { name: "Unlock your signer" })
+  ).toBeVisible()
+  await expect(page.getByText("0 sat", { exact: true })).toBeHidden()
+  await page.getByLabel("Passphrase").fill(DIRECT_PASSPHRASE)
+  await page.getByRole("button", { name: "Unlock Wallet" }).click()
+  await expect(page.getByText("0 sat", { exact: true })).toBeVisible()
+  expect((await readInstallation(page, DIRECT_PUBLIC_KEY)).recoveryPhrase).toBe(
+    installation.recoveryPhrase
+  )
+})
+
+test("wrong direct-nsec passphrase is controlled and leaves the record unchanged", async ({
+  page,
+}) => {
+  await signInWithNsec(page)
+  await page.reload()
+  const before = await readSignerRecord(page)
+
+  await page.getByLabel("Passphrase").fill("an incorrect passphrase")
+  await page.getByRole("button", { name: "Unlock Wallet" }).click()
+  await expect(
+    page.getByText(
+      "The passphrase or encrypted signer record could not be verified."
+    )
+  ).toBeVisible()
+  await expect(
+    page.getByRole("button", { name: /Try again in/ })
+  ).toBeDisabled()
+  await expect(page.getByText("0 sat", { exact: true })).toBeHidden()
+  expect(await readSignerRecord(page)).toEqual(before)
+
+  await page.getByLabel("Passphrase").fill(DIRECT_PASSPHRASE)
+  await page.getByRole("button", { name: "Unlock Wallet" }).click()
+  await expect(page.getByText("0 sat", { exact: true })).toBeVisible()
+})
+
+test("forgetting the passphrase removes only the signer and re-entry reopens the Wallet", async ({
+  page,
+}) => {
+  await signInWithNsec(page)
+  const first = await readInstallation(page, DIRECT_PUBLIC_KEY)
+  await page.reload()
+
+  await page.getByRole("button", { name: "Forgot passphrase" }).click()
+  await expect(
+    page.getByRole("heading", { name: "Forget encrypted signer?" })
+  ).toBeVisible()
+  await page.getByRole("button", { name: "Forget signer" }).click()
+  await expect(
+    page.getByText("Sign in with Nostr", { exact: true })
+  ).toBeVisible()
+  expect(await readSignerRecord(page)).toBeNull()
+  expect(
+    await page.evaluate(
+      (name) =>
+        indexedDB
+          .databases()
+          .then((databases) =>
+            databases.some((database) => database.name === name)
+          ),
+      first.databaseName
+    )
+  ).toBe(true)
+
+  await page.getByRole("button", { name: "Use an nsec" }).click()
+  await page.getByLabel("nsec").fill(DIRECT_NSEC)
+  await page
+    .getByLabel("Passphrase", { exact: true })
+    .fill("a replacement passphrase")
+  await page.getByLabel("Confirm passphrase").fill("a replacement passphrase")
+  await page.getByRole("button", { name: "Protect and open Wallet" }).click()
+  await expect(page.getByText("0 sat", { exact: true })).toBeVisible()
+  expect((await readInstallation(page, DIRECT_PUBLIC_KEY)).recoveryPhrase).toBe(
+    first.recoveryPhrase
+  )
+})
+
+test("direct-nsec Sign Out removes the signer while retaining the Coco database", async ({
+  page,
+}) => {
+  await signInWithNsec(page)
+  const installation = await readInstallation(page, DIRECT_PUBLIC_KEY)
+
+  await page.getByRole("link", { name: "Settings" }).click()
+  await expect(page.getByText("Direct nsec, encrypted at rest")).toBeVisible()
+  await page.getByRole("button", { name: "Sign Out" }).click()
+
+  expect(await readSignerRecord(page)).toBeNull()
+  expect(
+    await page.evaluate(
+      (name) =>
+        indexedDB
+          .databases()
+          .then((databases) =>
+            databases.some((database) => database.name === name)
+          ),
+      installation.databaseName
+    )
+  ).toBe(true)
+})
+
+test("a different direct nsec opens a distinct Wallet Installation", async ({
+  page,
+}) => {
+  await signInWithNsec(page)
+  const first = await readInstallation(page, DIRECT_PUBLIC_KEY)
+  await page.getByRole("link", { name: "Settings" }).click()
+  await page.getByRole("button", { name: "Sign Out" }).click()
+
+  await page.getByRole("button", { name: "Use an nsec" }).click()
+  await page.getByLabel("nsec").fill(OTHER_DIRECT_NSEC)
+  await page.getByLabel("Passphrase", { exact: true }).fill(DIRECT_PASSPHRASE)
+  await page.getByLabel("Confirm passphrase").fill(DIRECT_PASSPHRASE)
+  await page.getByRole("button", { name: "Protect and open Wallet" }).click()
+  await finishOpening(page)
+
+  const second = await readInstallation(page, OTHER_DIRECT_PUBLIC_KEY)
+  expect(second.databaseName).not.toBe(first.databaseName)
+  expect(second.recoveryPhrase).not.toBe(first.recoveryPhrase)
+})
+
+test("unsupported direct signer envelopes fail closed without silent deletion", async ({
+  page,
+}) => {
+  await page.goto("/")
+  const record = {
+    version: 1,
+    mode: "direct-nsec",
+    expectedPublicKey: DIRECT_PUBLIC_KEY,
+    envelope: {
+      version: 99,
+      kdf: {
+        name: "PBKDF2",
+        hash: "SHA-256",
+        iterations: 210_000,
+        salt: "AAECAwQFBgcICQoLDA0ODw==",
+      },
+      cipher: { name: "AES-GCM", iv: "EBESExQVFhcYGRob" },
+      ciphertext: "not-used",
+    },
+  }
+  await writeSignerRecord(page, record)
+  await page.reload()
+
+  await expect(page.getByText("Wallet could not open safely")).toBeVisible()
+  await expect(page.getByText(/unsupported version/)).toBeVisible()
+  expect(await readSignerRecord(page)).toEqual(record)
+})
 
 test("first open, reload, Recovery Phrase, and Sign Out/reopen retain Wallet Material", async ({
   page,
