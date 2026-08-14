@@ -15,6 +15,10 @@ const NSEC_PUBLIC_KEY =
 const PASSPHRASE = "correct horse battery staple"
 
 const PUBLIC_KEY = "a".repeat(64)
+const CLIENT_PUBLIC_KEY =
+  "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+const CLIENT_SECRET_KEY = "0".repeat(63) + "1"
+const REMOTE_SIGNER_PUBLIC_KEY = "b".repeat(64)
 
 afterEach(async () => {
   await indexedDB.deleteDatabase("npubcash-signer-vault-test")
@@ -63,6 +67,67 @@ describe("SignerVault", () => {
     const restoredSigner = await vault.unlockDirectNsec(record, PASSPHRASE)
     expect(restoredSigner.publicKey).toBe(NSEC_PUBLIC_KEY)
     restoredSigner.destroy()
+    vault.close()
+  })
+
+  test("persists only a structurally valid established NIP-46 connection", async () => {
+    const vault = new SignerVault("npubcash-signer-vault-test")
+    const connection = {
+      version: 1 as const,
+      protocolVersion: 1 as const,
+      mode: "nip46" as const,
+      clientSecretKey: CLIENT_SECRET_KEY,
+      clientPublicKey: CLIENT_PUBLIC_KEY,
+      remoteSignerPublicKey: REMOTE_SIGNER_PUBLIC_KEY,
+      expectedPublicKey: PUBLIC_KEY,
+      relays: ["wss://relay.example.com/"],
+      requestedPermissions: ["sign_event:27235"],
+      knownPermissions: ["sign_event:27235"],
+    }
+
+    await vault.saveNip46(connection)
+
+    expect(await vault.getActive()).toEqual(connection)
+    expect(JSON.stringify(await vault.getActive())).not.toContain(
+      "nostrconnect://"
+    )
+    vault.close()
+  })
+
+  test("rejects malformed NIP-46 key separation and relay records as corrupt", async () => {
+    const databaseName = "npubcash-signer-vault-test"
+    const request = indexedDB.open(databaseName, 1)
+    request.onupgradeneeded = () => request.result.createObjectStore("records")
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      request.onsuccess = () => resolve(request.result)
+      request.onerror = () => reject(request.error)
+    })
+    const transaction = database.transaction("records", "readwrite")
+    transaction.objectStore("records").put(
+      {
+        version: 1,
+        protocolVersion: 1,
+        mode: "nip46",
+        clientSecretKey: CLIENT_SECRET_KEY,
+        clientPublicKey: REMOTE_SIGNER_PUBLIC_KEY,
+        remoteSignerPublicKey: REMOTE_SIGNER_PUBLIC_KEY,
+        expectedPublicKey: PUBLIC_KEY,
+        relays: ["https://not-a-relay.example.com"],
+        requestedPermissions: [],
+        knownPermissions: [],
+      },
+      "active"
+    )
+    await new Promise<void>((resolve, reject) => {
+      transaction.oncomplete = () => resolve()
+      transaction.onerror = () => reject(transaction.error)
+    })
+    database.close()
+
+    const vault = new SignerVault(databaseName)
+    await expect(vault.getActive()).rejects.toBeInstanceOf(
+      SignerVaultCorruptRecordError
+    )
     vault.close()
   })
 

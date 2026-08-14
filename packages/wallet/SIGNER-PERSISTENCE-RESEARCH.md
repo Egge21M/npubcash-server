@@ -53,6 +53,86 @@ secret longer than necessary. Persist the established connection record
 instead. If the tab closes before pairing completes, restarting the pairing is
 safer and simpler than durably storing a half-established session.
 
+## Slice 3 compatibility audit: `nostr-tools@2.19.4`
+
+Verified against NIP-46 revision
+[`f0af204`](https://github.com/nostr-protocol/nips/blob/f0af20484c5e0d12e2d1936f87c5a6681a08daff/46.md)
+and the exact `nostr-tools` tag `v2.19.4` on 2026-08-13. The smallest compatible
+choice is to keep the pinned dependency and place a narrow, application-owned
+session adapter around `nostr-tools/nip46`; adding another Nostr SDK or
+upgrading the dependency is not required for this slice.
+
+The pinned package already exports `createNostrConnectURI`, `BunkerSigner`, and
+`BunkerPointer`. `BunkerSigner.fromURI()` listens for an app-initiated response,
+derives the remote-signer pubkey from the response author, decrypts with the
+candidate conversation key, and resolves only when the response result equals
+the URI secret. `getPublicKey()` sends `get_public_key` rather than returning
+the transport pubkey. Its `onauth` path keeps the original request listener
+alive after an `auth_url` response, allowing the required later response with
+the same request ID. These are the useful protocol primitives to reuse.
+[`nostr-tools@2.19.4` NIP-46 export](https://github.com/nbd-wtf/nostr-tools/blob/v2.19.4/package.json#L161-L170),
+[`nostr-tools@2.19.4` NIP-46 implementation](https://github.com/nbd-wtf/nostr-tools/blob/v2.19.4/nip46.ts),
+[NIP-46 client-initiated connection](https://github.com/nostr-protocol/nips/blob/f0af20484c5e0d12e2d1936f87c5a6681a08daff/46.md#L50-L67),
+[NIP-46 auth challenges](https://github.com/nostr-protocol/nips/blob/f0af20484c5e0d12e2d1936f87c5a6681a08daff/46.md#L211-L223)
+
+`BunkerSigner` is a primitive, not the complete Slice 3 lifecycle. The adapter
+must supply the following behavior:
+
+- Generate the client secret key and pairing secret independently. After
+  `fromURI()` resolves, copy only `{ pubkey, relays, secret: null }` into the
+  established record and drop all application references to the URI/pairing
+  secret. Do not persist the signer's public `bp.secret`, because `fromURI()`
+  leaves the one-time secret there.
+- On restoration, construct a fresh signer with
+  `BunkerSigner.fromBunker(clientSecretKey, sanitizedPointer)`, then call
+  `getPublicKey()`, require a 64-character lowercase hex pubkey, and compare it
+  exactly with the persisted Recipient Public Key before opening any Wallet.
+  Validate the same way before initial persistence. A new instance matters
+  because `getPublicKey()` caches its first result within an instance without
+  validating its shape.
+- Give pairing its own `SimplePool`. In 2.19.4, `fromURI()` accepts only a
+  numeric `maxWait`, not an `AbortSignal`; Cancel must destroy that dedicated
+  pool/subscription, ignore any late resolution, and dispose a signer that wins
+  the cancellation race. This also prevents pairing cancellation from closing
+  relays used by an established session.
+- Put an application timeout around every `sendRequest()`. The pinned method
+  has no request timeout, and an auth challenge is expressly allowed never to
+  receive its follow-up response. On timeout/cancel, discard the signer and its
+  pool rather than reusing a transport with unresolved internal listeners.
+- Validate `onauth` input as an allowed HTTP(S) URL before showing or opening
+  it. Treat it as progress, not completion; the original operation remains
+  pending until the same request ID receives a terminal result or error.
+- Call the generic `sendRequest("switch_relays", [])` immediately after pairing
+  and at reconnect intervals. Parse the result as JSON, accept only `null` or a
+  non-empty array of allowed `wss://` relay URLs, persist an accepted replacement
+  atomically, and recreate the signer/subscription on those relays. Merely
+  mutating `bp.relays` does not move the subscription that 2.19.4 already
+  opened.
+- On Sign Out, best-effort `sendRequest("logout", [])` with a short timeout and
+  optionally check for `"ack"`; regardless of its outcome, close transport,
+  delete the local client key and connection record, and finish local logout.
+
+The last two commands are required lifecycle behavior in the current spec but
+have no dedicated methods in 2.19.4; its public generic `sendRequest()` is the
+smallest escape hatch. NIP-46 says clients should request `switch_relays`
+immediately after connection, and explicitly says remote `logout` is only a
+courtesy while deletion of the local client keypair is mandatory.
+[NIP-46 methods and relay switching](https://github.com/nostr-protocol/nips/blob/f0af20484c5e0d12e2d1936f87c5a6681a08daff/46.md#L94-L129),
+[NIP-46 ending a session](https://github.com/nostr-protocol/nips/blob/f0af20484c5e0d12e2d1936f87c5a6681a08daff/46.md#L131-L135),
+[`nostr-tools@2.19.4` request and public-key behavior](https://github.com/nbd-wtf/nostr-tools/blob/v2.19.4/nip46.ts#L352-L419)
+
+No higher-level dependency is justified for this vertical slice. Slice 3 uses
+an application-owned kind-24133 session module built from the pinned package's
+`createNostrConnectURI`, NIP-44, event-signing, and `SimplePool` primitives,
+rather than wrapping `BunkerSigner`. Protocol tests confirmed that the product
+needs direct ownership of the pending-request map to reject every request on
+cancel/timeout, keep the same request pending across `auth_url`, and migrate
+the response subscription before sending on switched relays. `BunkerSigner`
+keeps those listeners private, does not reject them from `close()`, and cannot
+migrate its private subscription safely. The application module avoids
+duplicating cryptography while making cleanup and correlation part of its
+narrow tested interface.
+
 ## Storage and encryption choices
 
 ### Plain IndexedDB or `localStorage`
@@ -161,10 +241,12 @@ PRF must be progressive enhancement, not the only compatible path:
 
 ## Recommended first-release design
 
-1. Create one versioned `SignerVault` IndexedDB database, keyed by user pubkey
-   and separate from the Coco databases. Keep only non-secret routing metadata
-   readable before unlock; encrypt direct `nsec` bytes and NIP-46 client-secret
-   bytes with authenticated envelope encryption.
+1. Create one versioned `SignerVault` IndexedDB database separate from the Coco
+   databases. Encrypt direct `nsec` bytes with authenticated envelope
+   encryption. Per the subsequently accepted product design, persist an
+   established NIP-46 client connection key without a local passphrase: it is a
+   Signer Connection Secret rather than the Recipient's Identity Secret, and
+   the remote signer remains the authorization gate.
 2. Offer a passphrase-derived envelope as the supported baseline. Calibrate
    PBKDF2 work per device, store the chosen parameters, rate-limit attempts in
    the UI without claiming that client-side rate limiting prevents offline

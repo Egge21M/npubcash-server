@@ -3,7 +3,7 @@ import { createContext, useContext } from "react"
 import type { WalletInstallation } from "./wallet-registry"
 import type { WalletRuntime } from "./wallet-runtime"
 
-export type SignerMode = "nip07" | "direct-nsec"
+export type SignerMode = "nip07" | "direct-nsec" | "nip46"
 
 export type InitializationStage =
   | "restoring-session"
@@ -30,6 +30,37 @@ export type SignerCommandResult = { ok: true } | { ok: false; message: string }
 export type WalletSessionState =
   | { phase: "initializing"; stage: InitializationStage }
   | { phase: "signed-out" }
+  | {
+      phase: "nip46-pairing"
+      status:
+        | "waiting"
+        | "awaiting-authorization"
+        | "verified"
+        | "failed"
+        | "canceling"
+      uri: string
+      message?: string
+      authorizationUrl?: string
+    }
+  | {
+      phase: "nip46-reconnecting"
+      expectedPublicKey: string
+      status: "reconnecting" | "awaiting-authorization"
+      authorizationUrl?: string
+    }
+  | {
+      phase: "nip46-unavailable"
+      kind:
+        | "timeout"
+        | "revoked"
+        | "relay-loss"
+        | "authorization-rejected"
+        | "malformed-response"
+        | "spoofed-response"
+        | "public-key-mismatch"
+      expectedPublicKey: string
+      message: string
+    }
   | {
       phase: "direct-nsec-unlock"
       expectedPublicKey: string
@@ -59,6 +90,10 @@ export interface WalletRuntimeContextValue {
   state: WalletSessionState
   extensionAvailable: boolean
   signInWithNip07(): Promise<void>
+  connectRemoteSigner(): Promise<void>
+  cancelRemoteSigner(): Promise<void>
+  openRemoteAuthorization(): void
+  rePairRemoteSigner(): Promise<void>
   signInWithDirectNsec(
     nsec: string,
     passphrase: string

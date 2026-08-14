@@ -1,11 +1,15 @@
 import {
   ChevronDownIcon,
   CircleAlertIcon,
+  CopyIcon,
+  ExternalLinkIcon,
   KeyRoundIcon,
+  RadioTowerIcon,
   ShieldAlertIcon,
 } from "lucide-react"
 import { useEffect, useState, type FormEvent } from "react"
 import { Navigate } from "react-router-dom"
+import { QRCodeSVG } from "qrcode.react"
 
 import {
   AlertDialog,
@@ -20,6 +24,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
 import {
   Card,
   CardContent,
@@ -41,6 +46,14 @@ import {
   FieldLabel,
 } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
+import {
+  Drawer,
+  DrawerContent,
+  DrawerDescription,
+  DrawerFooter,
+  DrawerHeader,
+  DrawerTitle,
+} from "@/components/ui/drawer"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { cn } from "@/lib/utils"
@@ -135,8 +148,12 @@ export function InitializationPage({ stage }: { stage: InitializationStage }) {
 }
 
 function SignInPage() {
-  const { extensionAvailable, signInWithDirectNsec, signInWithNip07 } =
-    useWalletRuntime()
+  const {
+    connectRemoteSigner,
+    extensionAvailable,
+    signInWithDirectNsec,
+    signInWithNip07,
+  } = useWalletRuntime()
   const storageWarning = useStorageDurabilityWarning()
   const [nsec, setNsec] = useState("")
   const [passphrase, setPassphrase] = useState("")
@@ -211,6 +228,15 @@ function SignInPage() {
               update.
             </p>
           )}
+
+          <Button
+            className="w-full"
+            variant="outline"
+            onClick={() => void connectRemoteSigner()}
+          >
+            <RadioTowerIcon data-icon="inline-start" />
+            Connect remote signer
+          </Button>
 
           <Collapsible>
             <CollapsibleTrigger
@@ -559,6 +585,226 @@ export function NewWalletWarningPage() {
   )
 }
 
+function RemoteSignerPairingDrawer() {
+  const {
+    cancelRemoteSigner,
+    connectRemoteSigner,
+    openRemoteAuthorization,
+    state,
+  } = useWalletRuntime()
+  const [copyStatus, setCopyStatus] = useState("")
+
+  if (state.phase !== "nip46-pairing") return null
+
+  const waiting = state.status === "waiting"
+  const authorizing = state.status === "awaiting-authorization"
+  const busy = waiting || authorizing
+  const statusLabel =
+    state.status === "waiting"
+      ? "Waiting for signer"
+      : state.status === "awaiting-authorization"
+        ? "Authorization required"
+        : state.status === "verified"
+          ? "Signer verified"
+          : state.status === "canceling"
+            ? "Canceling"
+            : "Connection failed"
+
+  const copyPairingUri = async () => {
+    if (!state.uri) return
+    try {
+      await navigator.clipboard.writeText(state.uri)
+      setCopyStatus("Pairing address copied.")
+    } catch {
+      setCopyStatus("Copy failed. Select the pairing address below.")
+    }
+  }
+
+  return (
+    <Drawer
+      open
+      showSwipeHandle
+      onOpenChange={(open) => {
+        if (!open) void cancelRemoteSigner()
+      }}
+    >
+      <DrawerContent>
+        <DrawerHeader>
+          <div className="mx-auto flex w-full max-w-lg items-center justify-between gap-3 md:mx-0">
+            <DrawerTitle>Connect remote signer</DrawerTitle>
+            <Badge
+              variant={state.status === "failed" ? "destructive" : "secondary"}
+            >
+              {busy && <Spinner data-icon="inline-start" />}
+              {statusLabel}
+            </Badge>
+          </div>
+          <DrawerDescription>
+            Scan with your signer on another device. The one-time address is
+            discarded when this attempt ends.
+          </DrawerDescription>
+        </DrawerHeader>
+
+        <div className="mx-auto flex w-full max-w-lg flex-1 flex-col gap-4 overflow-y-auto p-4">
+          {state.uri && (
+            <>
+              <div className="mx-auto rounded-lg bg-white p-3">
+                <QRCodeSVG
+                  aria-label="Remote signer pairing QR code"
+                  level="M"
+                  size={224}
+                  title="Remote signer pairing QR code"
+                  value={state.uri}
+                />
+              </div>
+              <div className="flex flex-col gap-2">
+                <p className="text-sm font-medium">Pairing address</p>
+                <code className="max-h-24 overflow-y-auto rounded-md bg-muted p-3 text-xs break-all">
+                  {state.uri}
+                </code>
+                <Button variant="outline" onClick={() => void copyPairingUri()}>
+                  <CopyIcon data-icon="inline-start" />
+                  Copy pairing address
+                </Button>
+                <p className="text-sm text-muted-foreground" aria-live="polite">
+                  {copyStatus}
+                </p>
+              </div>
+            </>
+          )}
+
+          <div aria-live="polite" className="flex items-center gap-2 text-sm">
+            {busy && <Spinner aria-hidden="true" />}
+            <span>
+              {waiting && "Waiting for a matching one-time response…"}
+              {authorizing &&
+                "Your signer needs approval. Continue in a new tab, then return here."}
+              {state.status === "verified" &&
+                "Recipient Public Key verified. Opening the Wallet…"}
+              {state.status === "canceling" && "Removing pairing material…"}
+            </span>
+          </div>
+
+          {authorizing && (
+            <Alert>
+              <ExternalLinkIcon />
+              <AlertTitle>Signer authorization required</AlertTitle>
+              <AlertDescription>
+                Opening the authorization page is an explicit action. This
+                Wallet will keep waiting for the same request after it opens.
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {state.status === "failed" && (
+            <Alert variant="destructive">
+              <CircleAlertIcon />
+              <AlertTitle>Remote signer did not connect</AlertTitle>
+              <AlertDescription>{state.message}</AlertDescription>
+            </Alert>
+          )}
+        </div>
+
+        <DrawerFooter className="mx-auto w-full max-w-lg md:mx-0">
+          {authorizing && (
+            <Button onClick={openRemoteAuthorization}>
+              <ExternalLinkIcon data-icon="inline-start" />
+              Open authorization page
+            </Button>
+          )}
+          {state.status === "failed" && (
+            <Button onClick={() => void connectRemoteSigner()}>
+              Try again
+            </Button>
+          )}
+          <Button
+            disabled={state.status === "canceling"}
+            variant="outline"
+            onClick={() => void cancelRemoteSigner()}
+          >
+            Cancel
+          </Button>
+        </DrawerFooter>
+      </DrawerContent>
+    </Drawer>
+  )
+}
+
+function RemoteSignerReconnectingPage() {
+  const { openRemoteAuthorization, signOut, state } = useWalletRuntime()
+  if (state.phase !== "nip46-reconnecting") return null
+
+  return (
+    <PageFrame>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex flex-col gap-1">
+          <p className="text-sm font-medium text-primary">npub.cash</p>
+          <h1 className="text-2xl font-semibold tracking-tight">
+            Reconnecting remote signer
+          </h1>
+        </div>
+        <Badge variant="secondary">
+          <Spinner data-icon="inline-start" />
+          {state.status === "awaiting-authorization"
+            ? "Authorization required"
+            : "Reconnecting"}
+        </Badge>
+      </div>
+      <Alert>
+        <RadioTowerIcon />
+        <AlertTitle>The Wallet is still closed</AlertTitle>
+        <AlertDescription>
+          The remote signer must report the expected Public Key before any
+          Wallet Material is opened or shown.
+        </AlertDescription>
+      </Alert>
+      <p className="text-sm text-muted-foreground" aria-live="polite">
+        Verifying {state.expectedPublicKey.slice(0, 12)}… through the saved
+        signer connection.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {state.status === "awaiting-authorization" && (
+          <Button onClick={openRemoteAuthorization}>
+            <ExternalLinkIcon data-icon="inline-start" />
+            Open authorization page
+          </Button>
+        )}
+        <Button variant="outline" onClick={() => void signOut()}>
+          Sign Out locally
+        </Button>
+      </div>
+    </PageFrame>
+  )
+}
+
+function RemoteSignerUnavailablePage() {
+  const { rePairRemoteSigner, retry, signOut, state } = useWalletRuntime()
+  if (state.phase !== "nip46-unavailable") return null
+
+  return (
+    <PageFrame>
+      <Alert variant="destructive">
+        <CircleAlertIcon />
+        <AlertTitle>Remote signer unavailable</AlertTitle>
+        <AlertDescription>{state.message}</AlertDescription>
+      </Alert>
+      <p className="text-sm text-muted-foreground">
+        The Wallet for {state.expectedPublicKey.slice(0, 12)}… stayed closed.
+        Retrying or re-pairing never deletes its Wallet Material.
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <Button onClick={() => void retry()}>Retry connection</Button>
+        <Button variant="outline" onClick={() => void rePairRemoteSigner()}>
+          Re-pair signer
+        </Button>
+        <Button variant="outline" onClick={() => void signOut()}>
+          Sign Out locally
+        </Button>
+      </div>
+    </PageFrame>
+  )
+}
+
 export function HomeRoute() {
   const { state } = useWalletRuntime()
 
@@ -569,6 +815,20 @@ export function HomeRoute() {
   if (state.phase === "new-wallet-warning") return <NewWalletWarningPage />
   if (state.phase === "direct-nsec-unlock") {
     return <DirectNsecUnlockPage />
+  }
+  if (state.phase === "nip46-pairing") {
+    return (
+      <>
+        <SignInPage />
+        <RemoteSignerPairingDrawer />
+      </>
+    )
+  }
+  if (state.phase === "nip46-reconnecting") {
+    return <RemoteSignerReconnectingPage />
+  }
+  if (state.phase === "nip46-unavailable") {
+    return <RemoteSignerUnavailablePage />
   }
   if (state.phase === "failed") return <FailurePage />
   return <SignInPage />

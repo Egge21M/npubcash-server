@@ -26,7 +26,7 @@ Copy `.env.example` to `.env.local` when overriding local defaults.
 - `VITE_NPUBCASH_API_ORIGIN` is the public HTTPS npub.cash API origin. HTTP is
   accepted only for localhost development.
 - `VITE_NIP46_RELAYS` is a comma-separated list of secure `wss://` relay URLs
-  reserved for the later NIP-46 signer slice.
+  used to initiate NIP-46 remote-signer connections.
 
 Secrets, signer credentials, Recovery Phrases, proofs, and encoded tokens must
 never be placed in Vite environment variables.

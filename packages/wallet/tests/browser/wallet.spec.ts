@@ -1,4 +1,10 @@
-import { expect, test, type Page } from "@playwright/test"
+import { expect, test, type Page, type WebSocketRoute } from "@playwright/test"
+import {
+  finalizeEvent,
+  generateSecretKey,
+  getPublicKey,
+} from "nostr-tools/pure"
+import { decrypt, encrypt, getConversationKey } from "nostr-tools/nip44"
 
 const PUBLIC_KEY_A = "a".repeat(64)
 const PUBLIC_KEY_B = "b".repeat(64)
@@ -11,6 +17,301 @@ const OTHER_DIRECT_PUBLIC_KEY =
   "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
 const OTHER_DIRECT_NSEC =
   "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqpqptcfk2"
+
+type Nip46RelayTarget = {
+  route: WebSocketRoute
+  subscriptionId: string
+}
+
+class Nip46RelayFixture {
+  readonly remoteSecretKey = generateSecretKey()
+  readonly remoteSignerPublicKey = getPublicKey(this.remoteSecretKey)
+  recipientPublicKey = "c".repeat(64)
+  requestFailure: string | null = null
+  logoutFailure: string | null = null
+  authorizeGetPublicKey = false
+  offline = false
+  closedConnectionCount = 0
+  openConnectionCount = 0
+  private authorizationRequest: {
+    target: Nip46RelayTarget
+    clientPublicKey: string
+    requestId: string
+  } | null = null
+  private connections: Array<{
+    route: WebSocketRoute
+    subscriptions: Map<string, Record<string, unknown>>
+  }> = []
+
+  async install(page: Page): Promise<void> {
+    await page.routeWebSocket("wss://relay.example.com/", (route) => {
+      route.onClose(() => {
+        this.closedConnectionCount += 1
+        this.openConnectionCount = Math.max(0, this.openConnectionCount - 1)
+      })
+      if (this.offline) {
+        void route.close({ code: 1013, reason: "relay unavailable" })
+        return
+      }
+      this.openConnectionCount += 1
+      const connection = {
+        route,
+        subscriptions: new Map<string, Record<string, unknown>>(),
+      }
+      this.connections.push(connection)
+      route.onMessage((raw) => {
+        const message = JSON.parse(raw.toString()) as unknown[]
+        if (message[0] === "REQ") {
+          connection.subscriptions.set(
+            String(message[1]),
+            message[2] as Record<string, unknown>
+          )
+          return
+        }
+        if (message[0] === "CLOSE") {
+          connection.subscriptions.delete(String(message[1]))
+          return
+        }
+        if (message[0] !== "EVENT") return
+        const event = message[1] as {
+          id: string
+          pubkey: string
+          content: string
+        }
+        route.send(JSON.stringify(["OK", event.id, true, "accepted"]))
+        void this.respondToRequest(route, connection.subscriptions, event)
+      })
+    })
+  }
+
+  async pair(uri: string): Promise<void> {
+    const parsed = new URL(uri)
+    const clientPublicKey = parsed.hostname
+    const secret = parsed.searchParams.get("secret")!
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await this.sendResponse(clientPublicKey, `pairing-${attempt}`, secret)
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+  }
+
+  async goOffline(): Promise<void> {
+    this.offline = true
+    const connections = this.connections.splice(0)
+    await Promise.all(
+      connections.map(({ route }) =>
+        route.close({ code: 1013, reason: "relay unavailable" })
+      )
+    )
+  }
+
+  async authorize(): Promise<void> {
+    const pending = this.authorizationRequest
+    if (!pending) throw new Error("No authorization request is pending")
+    this.authorizationRequest = null
+    await this.sendResponse(
+      pending.clientPublicKey,
+      pending.requestId,
+      this.recipientPublicKey,
+      undefined,
+      pending.target
+    )
+  }
+
+  private async respondToRequest(
+    route: WebSocketRoute,
+    subscriptions: Map<string, Record<string, unknown>>,
+    event: { pubkey: string; content: string }
+  ): Promise<void> {
+    const request = JSON.parse(
+      decrypt(
+        event.content,
+        getConversationKey(this.remoteSecretKey, event.pubkey)
+      )
+    ) as { id: string; method: string }
+    const subscriptionId = this.subscriptionFor(subscriptions, event.pubkey)
+    if (!subscriptionId) return
+
+    if (request.method === "logout" && this.logoutFailure) {
+      await this.sendResponse(
+          event.pubkey,
+          request.id,
+          undefined,
+          this.logoutFailure,
+          { route, subscriptionId }
+      )
+      return
+    }
+    if (this.requestFailure) {
+      await this.sendResponse(
+        event.pubkey,
+        request.id,
+        undefined,
+        this.requestFailure,
+        { route, subscriptionId }
+      )
+      return
+    }
+    if (request.method === "switch_relays") {
+      await this.sendResponse(
+        event.pubkey,
+        request.id,
+        "null",
+        undefined,
+        { route, subscriptionId }
+      )
+      return
+    }
+    if (request.method === "get_public_key") {
+      if (this.authorizeGetPublicKey) {
+        this.authorizeGetPublicKey = false
+        this.authorizationRequest = {
+          target: { route, subscriptionId },
+          clientPublicKey: event.pubkey,
+          requestId: request.id,
+        }
+        await this.sendResponse(
+          event.pubkey,
+          request.id,
+          "auth_url",
+          "https://signer.example.com/authorize",
+          { route, subscriptionId }
+        )
+      } else {
+        await this.sendResponse(
+          event.pubkey,
+          request.id,
+          this.recipientPublicKey,
+          undefined,
+          { route, subscriptionId }
+        )
+      }
+      return
+    }
+    if (request.method === "logout") {
+      await this.sendResponse(
+        event.pubkey,
+        request.id,
+        "ack",
+        undefined,
+        { route, subscriptionId }
+      )
+    }
+  }
+
+  private subscriptionFor(
+    subscriptions: Map<string, Record<string, unknown>>,
+    clientPublicKey: string
+  ): string | null {
+    for (const [id, filter] of subscriptions) {
+      const recipients = filter["#p"] as string[] | undefined
+      if (recipients?.includes(clientPublicKey)) return id
+    }
+    return null
+  }
+
+  private async sendResponse(
+    clientPublicKey: string,
+    requestId: string,
+    result?: string,
+    error?: string,
+    selectedTarget?: Nip46RelayTarget
+  ): Promise<void> {
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const targets = selectedTarget
+        ? [selectedTarget]
+        : this.connections.flatMap(({ route, subscriptions }) => {
+            const subscriptionId = this.subscriptionFor(
+              subscriptions,
+              clientPublicKey
+            )
+            return subscriptionId ? [{ route, subscriptionId }] : []
+          })
+      if (targets.length > 0) {
+        const event = finalizeEvent(
+          {
+            kind: 24133,
+            created_at: Math.floor(Date.now() / 1000),
+            tags: [["p", clientPublicKey]],
+            content: encrypt(
+              JSON.stringify({ id: requestId, result, error }),
+              getConversationKey(this.remoteSecretKey, clientPublicKey)
+            ),
+          },
+          this.remoteSecretKey
+        )
+        for (const target of targets) {
+          target.route.send(
+            JSON.stringify(["EVENT", target.subscriptionId, event])
+          )
+        }
+        return
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    throw new Error("NIP-46 client subscription was not established")
+  }
+}
+
+async function failNip46Persistence(
+  page: Page,
+  initiallyEnabled = true
+): Promise<void> {
+  await page.addInitScript((enabled) => {
+    const control = {
+      get enabled() {
+        return localStorage.getItem("npubcash-test-fail-nip46-save") === "true"
+      },
+      set enabled(value: boolean) {
+        if (value) localStorage.setItem("npubcash-test-fail-nip46-save", "true")
+        else localStorage.removeItem("npubcash-test-fail-nip46-save")
+      },
+    }
+    if (enabled) control.enabled = true
+    Object.assign(window, { __npubcashFailNip46Save: control })
+    const originalPut = IDBObjectStore.prototype.put
+    IDBObjectStore.prototype.put = function (value: unknown, key?: IDBValidKey) {
+      if (
+        control.enabled &&
+        value &&
+        typeof value === "object" &&
+        (value as Record<string, unknown>).mode === "nip46"
+      ) {
+        throw new DOMException("Signer persistence failed", "UnknownError")
+      }
+      return key === undefined
+        ? originalPut.call(this, value)
+        : originalPut.call(this, value, key)
+    }
+  }, initiallyEnabled)
+}
+
+async function delayNip46Persistence(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const control = { pending: false, release: false }
+    Object.assign(window, { __npubcashNip46Save: control })
+    const originalPut = IDBObjectStore.prototype.put
+    IDBObjectStore.prototype.put = function (value: unknown, key?: IDBValidKey) {
+      const request =
+        key === undefined
+          ? originalPut.call(this, value)
+          : originalPut.call(this, value, key)
+      if (
+        value &&
+        typeof value === "object" &&
+        (value as Record<string, unknown>).mode === "nip46"
+      ) {
+        control.pending = true
+        const keepAlive = () => {
+          if (control.release) return
+          const keepAliveRequest = this.get("__npubcash-keepalive")
+          keepAliveRequest.onsuccess = keepAlive
+        }
+        keepAlive()
+      }
+      return request
+    }
+  })
+}
 
 async function installNip07(page: Page, publicKey = PUBLIC_KEY_A) {
   await page.addInitScript((initialPublicKey) => {
@@ -134,6 +435,266 @@ async function writeSignerRecord(page: Page, record: unknown) {
     database.close()
   }, record)
 }
+
+async function beginRemotePairing(page: Page): Promise<string> {
+  await page.goto("/")
+  await page.getByRole("button", { name: "Connect remote signer" }).click()
+  await expect(
+    page.getByRole("heading", { name: "Connect remote signer" })
+  ).toBeVisible()
+  await expect(page.getByLabel("Remote signer pairing QR code")).toBeVisible()
+  return page
+    .locator("code")
+    .textContent()
+    .then((value) => value!)
+}
+
+async function signInWithRemoteSigner(
+  page: Page,
+  fixture: Nip46RelayFixture
+): Promise<void> {
+  const uri = await beginRemotePairing(page)
+  await fixture.pair(uri)
+  await finishOpening(page)
+  await expect(page).toHaveURL(/\/wallet$/)
+}
+
+test("remote signer QR/copy pairing keeps auth correlated and persists only the established connection", async ({
+  page,
+  context,
+}) => {
+  const fixture = new Nip46RelayFixture()
+  await context.grantPermissions(["clipboard-read", "clipboard-write"])
+  fixture.authorizeGetPublicKey = true
+  await fixture.install(page)
+  await context.route("https://signer.example.com/authorize", (route) =>
+    route.fulfill({ contentType: "text/html", body: "Authorized" })
+  )
+
+  const uri = await beginRemotePairing(page)
+  const pairingSecret = new URL(uri).searchParams.get("secret")!
+  await page.getByRole("button", { name: "Copy pairing address" }).click()
+  await expect(page.getByText("Pairing address copied.")).toBeVisible()
+  await fixture.pair(uri)
+
+  await expect(
+    page.getByRole("button", { name: "Open authorization page" })
+  ).toBeVisible()
+  const popupPromise = context.waitForEvent("page")
+  await page.getByRole("button", { name: "Open authorization page" }).click()
+  const popup = await popupPromise
+  await expect(popup).toHaveURL("https://signer.example.com/authorize")
+  await popup.close()
+  await fixture.authorize()
+  await finishOpening(page)
+
+  const record = (await readSignerRecord(page)) as Record<string, unknown>
+  expect(record).toMatchObject({
+    version: 1,
+    protocolVersion: 1,
+    mode: "nip46",
+    remoteSignerPublicKey: fixture.remoteSignerPublicKey,
+    expectedPublicKey: fixture.recipientPublicKey,
+    relays: ["wss://relay.example.com/"],
+  })
+  expect(record.clientPublicKey).not.toBe(record.remoteSignerPublicKey)
+  expect(record.clientPublicKey).not.toBe(record.expectedPublicKey)
+  expect(JSON.stringify(record)).not.toContain(pairingSecret)
+  expect(JSON.stringify(record)).not.toContain("nostrconnect://")
+})
+
+test("remote signer reload is visibly reconnecting and a Public Key mismatch never opens the Wallet", async ({
+  page,
+}) => {
+  const fixture = new Nip46RelayFixture()
+  await fixture.install(page)
+  await signInWithRemoteSigner(page, fixture)
+
+  fixture.authorizeGetPublicKey = true
+  await page.reload()
+  await expect(
+    page.getByRole("heading", { name: "Reconnecting remote signer" })
+  ).toBeVisible()
+  await expect(page.getByText("The Wallet is still closed")).toBeVisible()
+  await expect(page.getByText("0 sat", { exact: true })).toBeHidden()
+  await fixture.authorize()
+  await expect(page.getByText("0 sat", { exact: true })).toBeVisible()
+
+  fixture.recipientPublicKey = "d".repeat(64)
+  await page.reload()
+  await expect(page.getByText("Remote signer unavailable")).toBeVisible()
+  await expect(page.getByText(/different Public Key/)).toBeVisible()
+  await expect(page.getByText("0 sat", { exact: true })).toBeHidden()
+  const databases = await page.evaluate(async () =>
+    (await indexedDB.databases())
+      .map((database) => database.name)
+      .filter((name) => name?.startsWith("npubcash-wallet-v1:"))
+  )
+  expect(databases).toEqual([`npubcash-wallet-v1:${"c".repeat(64)}`])
+})
+
+test("remote unavailability offers retry, re-pair, and local Sign Out without deleting Wallet Material", async ({
+  page,
+}) => {
+  const fixture = new Nip46RelayFixture()
+  await fixture.install(page)
+  await signInWithRemoteSigner(page, fixture)
+  const installation = await readInstallation(page, fixture.recipientPublicKey)
+
+  fixture.requestFailure = "remote signer revoked this connection"
+  await page.reload()
+  await expect(page.getByText("Remote signer unavailable")).toBeVisible()
+  await expect(
+    page.getByRole("button", { name: "Retry connection" })
+  ).toBeVisible()
+  await expect(
+    page.getByRole("button", { name: "Re-pair signer" })
+  ).toBeVisible()
+  await page.getByRole("button", { name: "Sign Out locally" }).click()
+
+  expect(await readSignerRecord(page)).toBeNull()
+  expect(
+    await page.evaluate(
+      (name) =>
+        indexedDB
+          .databases()
+          .then((databases) =>
+            databases.some((database) => database.name === name)
+          ),
+      installation.databaseName
+    )
+  ).toBe(true)
+})
+
+test("cancel erases incomplete pairing and remote logout failure cannot block local Sign Out", async ({
+  page,
+}) => {
+  const fixture = new Nip46RelayFixture()
+  await fixture.install(page)
+
+  await beginRemotePairing(page)
+  await page.getByRole("button", { name: "Cancel" }).click()
+  await expect(
+    page.getByText("Sign in with Nostr", { exact: true })
+  ).toBeVisible()
+  expect(await readSignerRecord(page)).toBeNull()
+
+  await signInWithRemoteSigner(page, fixture)
+  const installation = await readInstallation(page, fixture.recipientPublicKey)
+  fixture.logoutFailure = "remote signer is offline"
+  await page.getByRole("link", { name: "Settings" }).click()
+  await expect(page.getByText("NIP-46 remote signer")).toBeVisible()
+  await page.getByRole("button", { name: "Sign Out" }).click()
+
+  await expect(page).toHaveURL(/\/$/)
+  expect(await readSignerRecord(page)).toBeNull()
+  expect(
+    await page.evaluate(
+      (name) =>
+        indexedDB
+          .databases()
+          .then((databases) =>
+            databases.some((database) => database.name === name)
+          ),
+      installation.databaseName
+    )
+  ).toBe(true)
+})
+
+test("cancel during verified persistence cannot save a signer or reopen the Wallet", async ({
+  page,
+}) => {
+  const fixture = new Nip46RelayFixture()
+  await delayNip46Persistence(page)
+  await fixture.install(page)
+
+  const uri = await beginRemotePairing(page)
+  await fixture.pair(uri)
+  await page.waitForFunction(
+    () =>
+      (
+        window as typeof window & {
+          __npubcashNip46Save?: { pending: boolean }
+        }
+      ).__npubcashNip46Save?.pending === true
+  )
+  await expect(page.getByText("Signer verified", { exact: true })).toBeVisible()
+  await page.getByRole("button", { name: "Cancel" }).click()
+  await page.evaluate(() => {
+    const controlledWindow = window as typeof window & {
+      __npubcashNip46Save: { release: boolean }
+    }
+    controlledWindow.__npubcashNip46Save.release = true
+  })
+
+  await expect(
+    page.getByText("Sign in with Nostr", { exact: true })
+  ).toBeVisible()
+  expect(await readSignerRecord(page)).toBeNull()
+  await expect(page.getByText("0 sat", { exact: true })).toBeHidden()
+  await expect.poll(() => fixture.closedConnectionCount).toBeGreaterThan(0)
+})
+
+test("persistence failure closes the established remote session", async ({
+  page,
+}) => {
+  const fixture = new Nip46RelayFixture()
+  await failNip46Persistence(page)
+  await fixture.install(page)
+
+  const uri = await beginRemotePairing(page)
+  await fixture.pair(uri)
+
+  await expect(page.getByText("Remote signer did not connect")).toBeVisible()
+  await expect(page.getByText("Signer persistence failed")).toBeVisible()
+  expect(await readSignerRecord(page)).toBeNull()
+  await expect.poll(() => fixture.closedConnectionCount).toBeGreaterThan(0)
+  await expect.poll(() => fixture.openConnectionCount).toBe(0)
+})
+
+test("reconnect persistence failure closes the replacement remote session", async ({
+  page,
+}) => {
+  const fixture = new Nip46RelayFixture()
+  await failNip46Persistence(page, false)
+  await fixture.install(page)
+  await signInWithRemoteSigner(page, fixture)
+  await page.evaluate(() => {
+    const controlledWindow = window as typeof window & {
+      __npubcashFailNip46Save: { enabled: boolean }
+    }
+    controlledWindow.__npubcashFailNip46Save.enabled = true
+  })
+
+  await page.reload()
+
+  await expect(page.getByText("Remote signer unavailable")).toBeVisible()
+  await expect(page.getByText("Signer persistence failed")).toBeVisible()
+  expect(await readSignerRecord(page)).toMatchObject({ mode: "nip46" })
+  await expect.poll(() => fixture.openConnectionCount).toBe(0)
+})
+
+test("an offline remote signer leaves the Wallet closed with recovery actions", async ({
+  page,
+}) => {
+  const fixture = new Nip46RelayFixture()
+  await fixture.install(page)
+  await signInWithRemoteSigner(page, fixture)
+
+  await fixture.goOffline()
+  await page.reload()
+
+  await expect(page.getByText("Remote signer unavailable")).toBeVisible({
+    timeout: 15_000,
+  })
+  await expect(page.getByText("0 sat", { exact: true })).toBeHidden()
+  await expect(
+    page.getByRole("button", { name: "Retry connection" })
+  ).toBeVisible()
+  await expect(
+    page.getByRole("button", { name: "Sign Out locally" })
+  ).toBeVisible()
+})
 
 test("direct-nsec setup reports field-specific validation", async ({
   page,

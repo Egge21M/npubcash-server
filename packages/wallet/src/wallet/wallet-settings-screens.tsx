@@ -77,7 +77,9 @@ export function SettingsPage() {
             <ItemDescription>
               {state.signerMode === "nip07"
                 ? "NIP-07 browser extension"
-                : "Direct nsec, encrypted at rest"}
+                : state.signerMode === "direct-nsec"
+                  ? "Direct nsec, encrypted at rest"
+                  : "NIP-46 remote signer"}
             </ItemDescription>
           </ItemContent>
         </Item>

@@ -84,5 +84,12 @@ export function AuthenticatedLayout() {
   }
   if (state.phase === "failed") return <FailurePage />
   if (state.phase === "signed-out") return <Navigate replace to="/" />
+  if (
+    state.phase === "nip46-pairing" ||
+    state.phase === "nip46-reconnecting" ||
+    state.phase === "nip46-unavailable"
+  ) {
+    return <Navigate replace to="/" />
+  }
   return <AppShell />
 }

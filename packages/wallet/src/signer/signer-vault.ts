@@ -1,5 +1,8 @@
 import { normalizePublicKey } from "./nip07"
 import { decodeDirectNsec, DirectNsecSignerAdapter } from "./direct-nsec"
+import { getPublicKey } from "nostr-tools/pure"
+import type { Nip46ConnectionRecord } from "./nip46-session"
+import { normalizeNip46Relay } from "./nip46-relay"
 import {
   CorruptSignerEnvelopeError,
   decryptDirectNsecEnvelope,
@@ -27,7 +30,8 @@ export interface DirectNsecSignerRecord {
   envelope: DirectNsecEnvelopeV1
 }
 
-export type SignerRecord = Nip07SignerRecord | DirectNsecSignerRecord
+export type SignerRecord =
+  Nip07SignerRecord | DirectNsecSignerRecord | Nip46ConnectionRecord
 
 export const MINIMUM_SIGNER_PASSPHRASE_LENGTH = 12
 
@@ -145,6 +149,14 @@ export class SignerVault {
     }
   }
 
+  async saveNip46(connection: Nip46ConnectionRecord): Promise<void> {
+    const record = readNip46Record(connection)
+    const database = await this.database()
+    const transaction = database.transaction(RECORDS_STORE, "readwrite")
+    transaction.objectStore(RECORDS_STORE).put(record, ACTIVE_RECORD_KEY)
+    await transactionDone(transaction)
+  }
+
   async unlockDirectNsec(
     storedRecord: DirectNsecSignerRecord,
     passphrase: string
@@ -209,6 +221,79 @@ function readExpectedPublicKey(value: unknown): string {
   }
 }
 
+function readStringArray(value: unknown): string[] {
+  if (
+    !Array.isArray(value) ||
+    !value.every((entry) => typeof entry === "string" && entry.length > 0)
+  ) {
+    throw new SignerVaultCorruptRecordError()
+  }
+  return [...value]
+}
+
+function readRelayArray(value: unknown): string[] {
+  const relays = readStringArray(value)
+  if (relays.length === 0) throw new SignerVaultCorruptRecordError()
+  try {
+    return relays.map(normalizeNip46Relay)
+  } catch {
+    throw new SignerVaultCorruptRecordError()
+  }
+}
+
+function readNip46Record(value: unknown): Nip46ConnectionRecord {
+  if (!isRecord(value)) throw new SignerVaultCorruptRecordError()
+  if (value.version !== 1 || value.mode !== "nip46") {
+    throw new SignerVaultCorruptRecordError()
+  }
+  if (value.protocolVersion !== 1) {
+    throw new SignerVaultUnsupportedRecordError()
+  }
+  if (
+    typeof value.clientSecretKey !== "string" ||
+    !/^[0-9a-f]{64}$/.test(value.clientSecretKey)
+  ) {
+    throw new SignerVaultCorruptRecordError()
+  }
+
+  const clientPublicKey = readExpectedPublicKey(value.clientPublicKey)
+  const remoteSignerPublicKey = readExpectedPublicKey(
+    value.remoteSignerPublicKey
+  )
+  const expectedPublicKey = readExpectedPublicKey(value.expectedPublicKey)
+  const secretKey = Uint8Array.from(
+    value.clientSecretKey.match(/.{2}/g)!,
+    (byte) => parseInt(byte, 16)
+  )
+  try {
+    if (
+      getPublicKey(secretKey) !== clientPublicKey ||
+      clientPublicKey === remoteSignerPublicKey ||
+      clientPublicKey === expectedPublicKey
+    ) {
+      throw new SignerVaultCorruptRecordError()
+    }
+  } catch (error) {
+    if (error instanceof SignerVaultCorruptRecordError) throw error
+    throw new SignerVaultCorruptRecordError()
+  } finally {
+    secretKey.fill(0)
+  }
+
+  return {
+    version: 1,
+    protocolVersion: 1,
+    mode: "nip46",
+    clientSecretKey: value.clientSecretKey,
+    clientPublicKey,
+    remoteSignerPublicKey,
+    expectedPublicKey,
+    relays: readRelayArray(value.relays),
+    requestedPermissions: readStringArray(value.requestedPermissions),
+    knownPermissions: readStringArray(value.knownPermissions),
+  }
+}
+
 function readSignerRecord(value: unknown): SignerRecord {
   if (!isRecord(value)) throw new SignerVaultCorruptRecordError()
   if (value.version !== 1) throw new SignerVaultUnsupportedRecordError()
@@ -239,6 +324,8 @@ function readSignerRecord(value: unknown): SignerRecord {
       throw error
     }
   }
+
+  if (value.mode === "nip46") return readNip46Record(value)
 
   throw new SignerVaultUnsupportedRecordError()
 }
