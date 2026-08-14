@@ -54,6 +54,8 @@ async function fulfillJson(
 
 class BrowserPaymentFixture {
   mintAttempts = 0
+  mintAvailable = true
+  mintErrorCode: number | null = null
   readonly mintRequestPaths: string[] = []
   private readonly keysByMint = new Map<
     string,
@@ -168,6 +170,22 @@ class BrowserPaymentFixture {
         }
         if (url.pathname === "/v1/mint/bolt11") {
           this.mintAttempts += 1
+          if (!this.mintAvailable) {
+            await fulfillJson(
+              route,
+              { detail: "Mint temporarily unavailable" },
+              503
+            )
+            return
+          }
+          if (this.mintErrorCode !== null) {
+            await fulfillJson(
+              route,
+              { code: this.mintErrorCode, detail: "Mint quote expired" },
+              400
+            )
+            return
+          }
           const payload = request.postDataJSON() as {
             outputs: Array<{ amount: number; B_: string; id: string }>
           }
@@ -658,6 +676,19 @@ async function signInWithRemoteSigner(
   await expect(page).toHaveURL(/\/wallet$/)
 }
 
+test("Activity distinguishes an empty durable history", async ({ page }) => {
+  await installNip07(page)
+  await signIn(page)
+
+  await page.getByRole("link", { name: "Activity" }).click()
+
+  await expect(page).toHaveURL(/\/activity$/)
+  await expect(page.getByText("No Activity yet")).toBeVisible()
+  await expect(
+    page.getByText("Claims will appear here after Coco records them.")
+  ).toBeVisible()
+})
+
 test("one paid quote becomes persisted balance once across reload and repeated sync", async ({
   page,
 }) => {
@@ -683,9 +714,118 @@ test("one paid quote becomes persisted balance once across reload and repeated s
   await expect(page.getByText("21 sat", { exact: true })).toBeVisible()
   expect(payments.mintAttempts).toBe(1)
 
+  await page.getByRole("link", { name: "Activity" }).click()
+  await expect(page.getByRole("heading", { name: "Today" })).toBeVisible()
+  await page.getByRole("link", { name: /Payment claimed · 21 sat/ }).click()
+  await expect(page.getByRole("heading", { name: "21 sat" })).toBeVisible()
+  await expect(page.getByText("Payment claimed", { exact: true })).toBeVisible()
+
   await page.reload()
-  await expect(page.getByText("21 sat", { exact: true })).toBeVisible()
+  await expect(page.getByRole("heading", { name: "21 sat" })).toBeVisible()
+  await expect(page.getByText("Claimed", { exact: true })).toBeVisible()
   expect(payments.mintAttempts).toBe(1)
+
+  await page.evaluate(() => {
+    history.pushState({}, "", "/activity/unknown-after-claim")
+    window.dispatchEvent(new PopStateEvent("popstate"))
+  })
+  await expect(page.getByText("Claim not found")).toBeVisible()
+  await page.getByRole("link", { name: "Return to Activity" }).click()
+  await expect(
+    page.getByRole("link", { name: /Payment claimed · 21 sat/ })
+  ).toHaveCount(1)
+  expect(payments.mintAttempts).toBe(1)
+})
+
+test("a recoverable claim reopens pending and retries only its persisted operation", async ({
+  page,
+}) => {
+  const payments = new BrowserPaymentFixture([
+    {
+      quoteId: "browser-recoverable-quote",
+      mintUrl: "https://recoverable-mint.example",
+      amount: 89,
+      expiresAt: 1_800_000_000,
+      paidAt: 1_700_000_004,
+      request: "lnbc89",
+      locked: false,
+    },
+  ])
+  payments.mintAvailable = false
+  await payments.install(page)
+  await installNip07(page)
+
+  await signIn(page)
+  await page.getByRole("link", { name: "View details" }).first().click()
+  await expect(page.getByText("Retry available", { exact: true })).toBeVisible()
+  await expect(
+    page.getByRole("button", { name: "Retry this claim" })
+  ).toBeVisible()
+  const operationUrl = page.url()
+
+  await page.reload()
+  await expect(page).toHaveURL(operationUrl)
+  await expect(
+    page.getByRole("button", { name: "Retry this claim" })
+  ).toBeVisible()
+
+  payments.mintAvailable = true
+  await page.getByRole("button", { name: "Retry this claim" }).click()
+  await expect(page.getByText("Claimed", { exact: true })).toBeVisible()
+  await expect(
+    page.getByRole("button", { name: "Retry this claim" })
+  ).toHaveCount(0)
+
+  await page.getByRole("link", { name: "Activity" }).first().click()
+  await expect(
+    page.getByRole("link", { name: /Payment claimed · 89 sat/ })
+  ).toHaveCount(1)
+})
+
+test("a terminal claim exposes details without a retry action", async ({
+  page,
+}) => {
+  const payments = new BrowserPaymentFixture([
+    {
+      quoteId: "browser-terminal-quote",
+      mintUrl: "https://terminal-mint.example",
+      amount: 55,
+      expiresAt: 1_800_000_000,
+      paidAt: 1_700_000_005,
+      request: "lnbc55",
+      locked: false,
+    },
+  ])
+  payments.mintErrorCode = 20007
+  await payments.install(page)
+  await installNip07(page)
+
+  await signIn(page)
+  await page.getByRole("link", { name: "View details" }).click()
+
+  await expect(page.getByText("This claim is terminal")).toBeVisible()
+  await expect(page.getByText("Failed", { exact: true })).toBeVisible()
+  await expect(
+    page.getByRole("button", { name: "Retry this claim" })
+  ).toHaveCount(0)
+  await page.getByRole("button", { name: "Technical details" }).click()
+  await expect(page.getByText("failed", { exact: true })).toBeVisible()
+})
+
+test("an unknown Activity operation is not found and creates no work", async ({
+  page,
+}) => {
+  await installNip07(page)
+  await signIn(page)
+
+  await page.goto("/activity/unknown-operation")
+
+  await expect(page.getByText("Claim not found")).toBeVisible()
+  await expect(
+    page.getByText("No new work was created.", { exact: false })
+  ).toBeVisible()
+  await page.getByRole("link", { name: "Return to Activity" }).click()
+  await expect(page.getByText("No Activity yet")).toBeVisible()
 })
 
 test("paid quotes aggregate across two mints and keep a visible mint split", async ({

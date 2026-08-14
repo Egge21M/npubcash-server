@@ -1,4 +1,4 @@
-import { SettingsIcon, WalletCardsIcon } from "lucide-react"
+import { HistoryIcon, SettingsIcon, WalletCardsIcon } from "lucide-react"
 import { Link, Navigate, NavLink, Outlet } from "react-router-dom"
 
 import { buttonVariants } from "@/components/ui/button"
@@ -14,6 +14,7 @@ import {
 function Navigation() {
   const destinations = [
     { to: "/wallet", label: "Wallet", icon: WalletCardsIcon },
+    { to: "/activity", label: "Activity", icon: HistoryIcon },
     { to: "/settings", label: "Settings", icon: SettingsIcon },
   ]
 

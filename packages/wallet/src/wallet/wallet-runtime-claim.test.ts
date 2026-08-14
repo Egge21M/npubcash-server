@@ -63,6 +63,16 @@ class DeterministicBoundaries {
   readonly keyset = createNewMintKeys(16, new Uint8Array(32).fill(7))
   readonly quotes: Quote[]
   mintAttempts = 0
+  mintAvailable = true
+  private mintResponseGate: Promise<void> | null = null
+
+  holdNextMintResponse(): () => void {
+    let release = () => undefined
+    this.mintResponseGate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    return release
+  }
 
   constructor(quotes: Quote[]) {
     this.quotes = quotes
@@ -161,6 +171,13 @@ class DeterministicBoundaries {
       }
       if (url.pathname === "/v1/mint/bolt11") {
         this.mintAttempts += 1
+        if (!this.mintAvailable) {
+          return json({ detail: "Mint temporarily unavailable" }, 503)
+        }
+        if (this.mintResponseGate) {
+          await this.mintResponseGate
+          this.mintResponseGate = null
+        }
         const payload = JSON.parse(String(init?.body)) as {
           outputs: Array<{ amount: number; B_: string; id: string }>
         }
@@ -298,5 +315,112 @@ describe("WalletRuntime paid quote integration", () => {
     expect(runtime.paymentSyncSnapshot().issues).toContainEqual(
       expect.objectContaining({ kind: "malformed-quote" })
     )
+  })
+
+  test("reopens and recovers exactly one persisted claim operation", async () => {
+    const { openWalletRuntime } = await import("./wallet-runtime")
+    const boundaries = new DeterministicBoundaries([
+      {
+        quoteId: "recoverable-quote",
+        mintUrl: MINT_URL,
+        amount: 89,
+        expiresAt: 1_800_000_000,
+        paidAt: 1_700_000_002,
+        request: "lnbc89",
+        locked: false,
+      },
+    ])
+    boundaries.mintAvailable = false
+    globalThis.fetch = boundaries.fetch
+    const wallet = installation("npubcash-claim-recovery")
+
+    let runtime = await openWalletRuntime(wallet, signer)
+    openRuntimes.push(runtime)
+    await runtime.syncPayments()
+
+    const failedAttemptHistory = (
+      await runtime.coco.history.getPaginatedHistory(0, 20)
+    ).filter((entry) => entry.type === "mint")
+    expect(failedAttemptHistory).toHaveLength(1)
+    expect(failedAttemptHistory[0]).toMatchObject({
+      state: "pending",
+      amount: expect.anything(),
+    })
+    const operationId = failedAttemptHistory[0]!.operationId
+    expect(operationId).toBeString()
+
+    await runtime.close()
+    openRuntimes.splice(openRuntimes.indexOf(runtime), 1)
+    runtime = await openWalletRuntime(wallet, signer)
+    openRuntimes.push(runtime)
+
+    expect(await runtime.coco.ops.mint.get(operationId!)).toMatchObject({
+      id: operationId,
+      state: "pending",
+    })
+
+    boundaries.mintAvailable = true
+    const attemptsBeforeRecovery = boundaries.mintAttempts
+    const concurrentRecovery = await Promise.all([
+      runtime.recoverClaim(operationId!),
+      runtime.recoverClaim(operationId!),
+    ])
+    const recovered = await runtime.coco.ops.mint.get(operationId!)
+
+    expect(recovered).toMatchObject({ id: operationId, state: "finalized" })
+    expect(concurrentRecovery).toEqual([
+      expect.objectContaining({ id: operationId, state: "finalized" }),
+      expect.objectContaining({ id: operationId, state: "finalized" }),
+    ])
+    expect(boundaries.mintAttempts - attemptsBeforeRecovery).toBe(1)
+    expect((await runtime.balance()).spendable.toNumber()).toBe(89)
+    const recoveredHistory = (
+      await runtime.coco.history.getPaginatedHistory(0, 20)
+    ).filter((entry) => entry.type === "mint")
+    expect(recoveredHistory).toHaveLength(1)
+    expect(recoveredHistory[0]).toMatchObject({
+      operationId,
+      state: "finalized",
+    })
+  })
+
+  test("re-reads an executing claim after concurrent Coco completion", async () => {
+    const { openWalletRuntime } = await import("./wallet-runtime")
+    const boundaries = new DeterministicBoundaries([
+      {
+        quoteId: "executing-quote",
+        mintUrl: MINT_URL,
+        amount: 144,
+        expiresAt: 1_800_000_000,
+        paidAt: 1_700_000_003,
+        request: "lnbc144",
+        locked: false,
+      },
+    ])
+    const releaseMint = boundaries.holdNextMintResponse()
+    globalThis.fetch = boundaries.fetch
+    const runtime = await openWalletRuntime(
+      installation("npubcash-executing-recovery"),
+      signer
+    )
+    openRuntimes.push(runtime)
+
+    const sync = runtime.syncPayments()
+    for (let attempt = 0; boundaries.mintAttempts === 0; attempt += 1) {
+      if (attempt === 100) throw new Error("Mint execution did not start")
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    const [executing] = await runtime.coco.ops.mint.listInFlight()
+    expect(executing).toMatchObject({ state: "executing" })
+
+    const recovery = runtime.recoverClaim(executing!.id)
+    releaseMint()
+    await sync
+
+    expect(await recovery).toMatchObject({
+      id: executing!.id,
+      state: "finalized",
+    })
+    expect((await runtime.balance()).spendable.toNumber()).toBe(144)
   })
 })

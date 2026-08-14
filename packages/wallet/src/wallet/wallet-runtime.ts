@@ -1,5 +1,6 @@
 import {
   initializeCoco,
+  OperationInProgressError,
   type BalanceSnapshot,
   type Manager,
   type MintOperation,
@@ -32,7 +33,7 @@ interface ClosableDatabase {
   close(): void
 }
 
-export type PaymentSyncIssue =
+export type PaymentSyncIssue = (
   | NpubCashQuoteIssue
   | PinnedNPCIssue
   | {
@@ -40,6 +41,7 @@ export type PaymentSyncIssue =
       title: string
       message: string
     }
+) & { operationId?: string }
 
 export interface PaymentClaimProjection {
   operationId: string
@@ -70,6 +72,7 @@ const EMPTY_PAYMENT_SYNC_SNAPSHOT: PaymentSyncSnapshot = {
 }
 
 const PAYMENT_SYNC_INTERVAL_MS = 30_000
+const CLAIM_RECOVERY_CONCURRENCY_WAIT_MS = 5_000
 
 function classifyNpubCashFailure(error: unknown): PaymentSyncIssue {
   if (typeof navigator !== "undefined" && navigator.onLine === false) {
@@ -133,6 +136,40 @@ export class WalletRuntime {
 
   balance(): Promise<BalanceSnapshot> {
     return this.coco.wallet.balances.total({ trustedOnly: true })
+  }
+
+  async recoverClaim(operationId: string): Promise<MintOperation | null> {
+    const operation = await this.coco.ops.mint.get(operationId)
+    if (
+      !operation ||
+      (operation.state !== "pending" && operation.state !== "executing")
+    ) {
+      return operation
+    }
+
+    try {
+      await this.coco.ops.mint.refresh(operationId)
+    } catch (error) {
+      let latest = await this.coco.ops.mint.get(operationId)
+      if (!latest) throw error
+      if (latest.state !== operation.state) return latest
+      if (error instanceof OperationInProgressError) {
+        const waitUntil = Date.now() + CLAIM_RECOVERY_CONCURRENCY_WAIT_MS
+        while (
+          this.coco.ops.mint.diagnostics.isLocked(operationId) &&
+          Date.now() < waitUntil
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 10))
+        }
+        if (this.coco.ops.mint.diagnostics.isLocked(operationId)) throw error
+        latest = await this.coco.ops.mint.get(operationId)
+        if (!latest) throw error
+        return latest
+      }
+      throw error
+    }
+
+    return this.coco.ops.mint.get(operationId)
   }
 
   npubCashAccountCount(): number {
@@ -226,11 +263,12 @@ export class WalletRuntime {
         ])
         const failedClaims: PaymentSyncIssue[] = history
           .filter((entry) => entry.type === "mint" && entry.state === "failed")
-          .map(() => ({
+          .map((entry) => ({
             kind: "claim-failed" as const,
             title: "Payment claim failed",
             message:
               "Coco retained this failed claim so it can be understood and recovered safely.",
+            operationId: entry.operationId,
           }))
         const claims = inFlight.map((operation) => ({
           operationId: operation.id,

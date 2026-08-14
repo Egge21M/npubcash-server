@@ -3,6 +3,8 @@ import { createBrowserRouter, RouterProvider } from "react-router-dom"
 import { Toaster } from "@/components/ui/toast"
 import { WalletRuntimeProvider } from "@/wallet/wallet-runtime-provider"
 import {
+  ActivityDetailPage,
+  ActivityPage,
   AuthenticatedLayout,
   HomeRoute,
   RecoveryPage,
@@ -21,6 +23,11 @@ const router = createBrowserRouter([
         element: <AuthenticatedLayout />,
         children: [
           { path: "/wallet", element: <WalletPage /> },
+          { path: "/activity", element: <ActivityPage /> },
+          {
+            path: "/activity/:operationId",
+            element: <ActivityDetailPage />,
+          },
           { path: "/settings", element: <SettingsPage /> },
           { path: "/settings/recovery", element: <RecoveryPage /> },
         ],

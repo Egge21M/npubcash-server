@@ -7,6 +7,7 @@ import {
   ShieldAlertIcon,
 } from "lucide-react"
 import { useEffect, useRef, useSyncExternalStore } from "react"
+import { Link } from "react-router-dom"
 
 import {
   Alert,
@@ -15,7 +16,7 @@ import {
   AlertTitle,
 } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
+import { Button, buttonVariants } from "@/components/ui/button"
 import {
   Card,
   CardContent,
@@ -93,6 +94,14 @@ function PaymentSyncStatus({ runtime }: { runtime: WalletRuntime }) {
             Coco has persisted this claim from {new URL(claim.mintUrl).host}.
             The Wallet will reconcile it without creating a duplicate.
           </AlertDescription>
+          <AlertAction>
+            <Link
+              className={buttonVariants({ variant: "outline", size: "sm" })}
+              to={`/activity/${claim.operationId}`}
+            >
+              View details
+            </Link>
+          </AlertAction>
         </Alert>
       ))}
 
@@ -107,19 +116,31 @@ function PaymentSyncStatus({ runtime }: { runtime: WalletRuntime }) {
           <AlertTitle>{issue.title}</AlertTitle>
           <AlertDescription>{issue.message}</AlertDescription>
           <AlertAction>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={snapshot.checking}
-              onClick={() => void runtime.syncPayments()}
-            >
-              {snapshot.checking ? (
-                <Spinner data-icon="inline-start" />
-              ) : (
-                <RefreshCwIcon data-icon="inline-start" />
-              )}
-              Check again
-            </Button>
+            {issue.operationId ? (
+              <Link
+                className={buttonVariants({
+                  variant: "outline",
+                  size: "sm",
+                })}
+                to={`/activity/${issue.operationId}`}
+              >
+                View details
+              </Link>
+            ) : (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={snapshot.checking}
+                onClick={() => void runtime.syncPayments()}
+              >
+                {snapshot.checking ? (
+                  <Spinner data-icon="inline-start" />
+                ) : (
+                  <RefreshCwIcon data-icon="inline-start" />
+                )}
+                Check again
+              </Button>
+            )}
           </AlertAction>
         </Alert>
       ))}
