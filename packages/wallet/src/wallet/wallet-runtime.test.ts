@@ -5,6 +5,29 @@ import type { Manager } from "@cashu/coco-core"
 
 import type { WalletInstallation } from "./wallet-registry"
 
+Object.defineProperty(globalThis, "localStorage", {
+  configurable: true,
+  value: {
+    getItem: () => null,
+    setItem: () => undefined,
+    removeItem: () => undefined,
+  },
+})
+
+const signer = {
+  signEvent: async (event: {
+    kind: number
+    created_at: number
+    tags: string[][]
+    content: string
+  }) => ({
+    ...event,
+    pubkey: installation.publicKey,
+    id: "1".repeat(64),
+    sig: "2".repeat(128),
+  }),
+}
+
 const installation: WalletInstallation = {
   version: 1,
   publicKey: "a".repeat(64),
@@ -26,10 +49,10 @@ afterEach(async () => {
 describe("WalletRuntime", () => {
   test("opens a real Coco wallet with a zero trusted balance", async () => {
     const { openWalletRuntime } = await import("./wallet-runtime")
-    const runtime = await openWalletRuntime(installation)
+    const runtime = await openWalletRuntime(installation, signer)
 
     expect((await runtime.balance()).spendable.toNumber()).toBe(0)
-    expect(runtime.npubCashAccountCount()).toBe(0)
+    expect(runtime.npubCashAccountCount()).toBe(1)
     await runtime.close()
   })
 
@@ -72,5 +95,21 @@ describe("WalletRuntime", () => {
 
     await expect(runtime.close()).rejects.toThrow("dispose failed")
     expect(events).toEqual(["manager disposal attempted", "database closed"])
+  })
+
+  test("keeps a precise API failure when NPC also emits a generic diagnostic", async () => {
+    const { WalletRuntime } = await import("./wallet-runtime")
+    const runtime = new WalletRuntime({} as Manager, { close: () => undefined })
+
+    runtime.reportNpubCashFailure({ statusCode: 401 })
+    runtime.reportNPCIssue({
+      kind: "claim-failed",
+      title: "Payment synchronization did not finish",
+      message: "generic",
+    })
+
+    expect(runtime.paymentSyncSnapshot().issues).toEqual([
+      expect.objectContaining({ kind: "api-authorization" }),
+    ])
   })
 })

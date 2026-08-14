@@ -27,6 +27,7 @@ import {
   reconnectNip46,
 } from "@/signer/nip46-session"
 import { walletEnvironment } from "@/config/environment"
+import type { NostrEventSigner } from "@/signer/npubcash-auth"
 import {
   MissingWalletSeedError,
   WalletRegistry,
@@ -82,6 +83,7 @@ export function WalletRuntimeProvider() {
     () => findNip07Provider() !== null
   )
   const runtimeRef = useRef<WalletRuntime | null>(null)
+  const activeSignerRef = useRef<NostrEventSigner | null>(null)
   const directSignerRef = useRef<DirectNsecSignerAdapter | null>(null)
   const pendingDirectRecordRef = useRef<DirectNsecSignerRecord | null>(null)
   const nip46PairingRef = useRef<Nip46Pairing | null>(null)
@@ -103,6 +105,7 @@ export function WalletRuntimeProvider() {
   }, [])
 
   const clearRuntimeSigners = useCallback(async () => {
+    activeSignerRef.current = null
     clearDirectSigner()
     await clearNip46Session()
   }, [clearDirectSigner, clearNip46Session])
@@ -129,16 +132,19 @@ export function WalletRuntimeProvider() {
   }, [extensionAvailable, refreshExtensionAvailability])
 
   const startRuntime = useCallback(
-    async (installation: WalletInstallation, signerMode: SignerMode) => {
+    async (
+      installation: WalletInstallation,
+      signerMode: SignerMode,
+      signer: NostrEventSigner
+    ) => {
       setState({ phase: "initializing", stage: "starting-coco" })
       let runtime: WalletRuntime | null = null
 
       try {
         await nextRenderOpportunity()
-        runtime = await openWalletRuntime(installation)
+        runtime = await openWalletRuntime(installation, signer)
 
-        // initializeCoco has now initialized the production NPC plugin boundary.
-        // Adding an authenticated account and syncing claims remains Slice 4.
+        // Give React a render opportunity between the runtime startup stages.
         flushSync(() => {
           setState({ phase: "initializing", stage: "connecting-npubcash" })
         })
@@ -147,8 +153,7 @@ export function WalletRuntimeProvider() {
         flushSync(() => {
           setState({ phase: "initializing", stage: "checking-payments" })
         })
-        runtime.npubCashAccountCount()
-        await nextRenderOpportunity()
+        await runtime.syncPayments()
 
         runtimeRef.current = runtime
         setState({ phase: "open", installation, runtime, signerMode })
@@ -166,7 +171,12 @@ export function WalletRuntimeProvider() {
   )
 
   const openForPublicKey = useCallback(
-    async (publicKey: string, signerMode: SignerMode) => {
+    async (
+      publicKey: string,
+      signerMode: SignerMode,
+      signer: NostrEventSigner
+    ) => {
+      activeSignerRef.current = signer
       setState({ phase: "initializing", stage: "opening-wallet" })
 
       let installation: WalletInstallation
@@ -200,7 +210,7 @@ export function WalletRuntimeProvider() {
         return
       }
 
-      await startRuntime(installation, signerMode)
+      await startRuntime(installation, signerMode, signer)
     },
     [startRuntime]
   )
@@ -208,6 +218,7 @@ export function WalletRuntimeProvider() {
   const restore = useCallback(async () => {
     nip46ReconnectAbortRef.current?.abort()
     nip46ReconnectAbortRef.current = null
+    activeSignerRef.current = null
     clearDirectSigner()
     await clearNip46Session()
     resetDirectUnlockRateLimit()
@@ -281,7 +292,11 @@ export function WalletRuntimeProvider() {
         }
         nip46ReconnectAbortRef.current = null
         nip46SessionRef.current = established.session
-        await openForPublicKey(established.record.expectedPublicKey, "nip46")
+        await openForPublicKey(
+          established.record.expectedPublicKey,
+          "nip46",
+          established.session
+        )
       } catch (error) {
         await established?.session.close(error)
         if (nip46ReconnectAbortRef.current === reconnectController) {
@@ -319,10 +334,9 @@ export function WalletRuntimeProvider() {
     setState({ phase: "initializing", stage: "verifying-signer" })
 
     try {
-      const publicKey = await new Nip07SignerAdapter(provider).open(
-        signerRecord.expectedPublicKey
-      )
-      await openForPublicKey(publicKey, "nip07")
+      const signer = new Nip07SignerAdapter(provider)
+      const publicKey = await signer.open(signerRecord.expectedPublicKey)
+      await openForPublicKey(publicKey, "nip07", signer)
     } catch (error) {
       if (error instanceof Nip07PublicKeyMismatchError) {
         setState({
@@ -366,9 +380,10 @@ export function WalletRuntimeProvider() {
         setState({ phase: "initializing", stage: "verifying-signer" })
 
         try {
-          const publicKey = await new Nip07SignerAdapter(provider).open()
+          const signer = new Nip07SignerAdapter(provider)
+          const publicKey = await signer.open()
           await signerVault.saveNip07(publicKey)
-          await openForPublicKey(publicKey, "nip07")
+          await openForPublicKey(publicKey, "nip07", signer)
         } catch (error) {
           setState({
             phase: "failed",
@@ -393,7 +408,7 @@ export function WalletRuntimeProvider() {
           clearDirectSigner()
           directSignerRef.current = signer
           pendingDirectRecordRef.current = null
-          await openForPublicKey(signer.publicKey, "direct-nsec")
+          await openForPublicKey(signer.publicKey, "direct-nsec", signer)
         } catch (error) {
           result = { ok: false, message: errorMessage(error) }
         }
@@ -462,7 +477,11 @@ export function WalletRuntimeProvider() {
       nip46PairingRef.current = null
       await clearNip46Session()
       nip46SessionRef.current = established.session
-      await openForPublicKey(established.record.expectedPublicKey, "nip46")
+      await openForPublicKey(
+        established.record.expectedPublicKey,
+        "nip46",
+        established.session
+      )
     } catch (error) {
       if (nip46PairingRef.current === pairing) {
         nip46PairingRef.current = null
@@ -539,7 +558,7 @@ export function WalletRuntimeProvider() {
           resetDirectUnlockRateLimit()
           clearDirectSigner()
           directSignerRef.current = signer
-          await openForPublicKey(signer.publicKey, "direct-nsec")
+          await openForPublicKey(signer.publicKey, "direct-nsec", signer)
         } catch (error) {
           if (error instanceof DirectNsecUnlockError) {
             failedDirectUnlockAttemptsRef.current += 1
@@ -625,8 +644,12 @@ export function WalletRuntimeProvider() {
 
   const continueOpeningWallet = useCallback(() => {
     if (state.phase !== "new-wallet-warning") return Promise.resolve()
-    return runOneOpen(() => startRuntime(state.installation, state.signerMode))
-  }, [runOneOpen, startRuntime, state])
+    const signer = activeSignerRef.current
+    if (!signer) return runOneOpen(restore)
+    return runOneOpen(() =>
+      startRuntime(state.installation, state.signerMode, signer)
+    )
+  }, [restore, runOneOpen, startRuntime, state])
 
   const removeStrandedWallet = useCallback(async () => {
     if (state.phase !== "failed" || !state.publicKey) return
@@ -646,6 +669,7 @@ export function WalletRuntimeProvider() {
       void pairing?.cancel()
       const runtime = runtimeRef.current
       runtimeRef.current = null
+      activeSignerRef.current = null
       clearDirectSigner()
       void clearNip46Session()
       void runtime?.close()

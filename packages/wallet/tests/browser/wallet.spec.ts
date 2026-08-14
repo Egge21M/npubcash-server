@@ -1,4 +1,15 @@
-import { expect, test, type Page, type WebSocketRoute } from "@playwright/test"
+import {
+  expect,
+  test,
+  type Page,
+  type Route,
+  type WebSocketRoute,
+} from "@playwright/test"
+import {
+  createBlindSignature,
+  createNewMintKeys,
+  pointFromHex,
+} from "@cashu/cashu-ts"
 import {
   finalizeEvent,
   generateSecretKey,
@@ -17,6 +28,176 @@ const OTHER_DIRECT_PUBLIC_KEY =
   "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
 const OTHER_DIRECT_NSEC =
   "nsec1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqpqptcfk2"
+
+type BrowserQuote = {
+  quoteId: string
+  mintUrl: string
+  amount: number
+  expiresAt: number
+  paidAt: number
+  request: string
+  locked: boolean
+}
+
+async function fulfillJson(
+  route: Route,
+  body: unknown,
+  status = 200
+): Promise<void> {
+  await route.fulfill({
+    status,
+    contentType: "application/json",
+    headers: { "access-control-allow-origin": "*" },
+    body: JSON.stringify(body),
+  })
+}
+
+class BrowserPaymentFixture {
+  mintAttempts = 0
+  readonly mintRequestPaths: string[] = []
+  private readonly keysByMint = new Map<
+    string,
+    ReturnType<typeof createNewMintKeys>
+  >()
+
+  constructor(readonly quotes: BrowserQuote[]) {
+    for (const [index, mintUrl] of [
+      ...new Set(quotes.map((quote) => quote.mintUrl)),
+    ].entries()) {
+      this.keysByMint.set(
+        mintUrl,
+        createNewMintKeys(16, new Uint8Array(32).fill(index + 3))
+      )
+    }
+  }
+
+  async install(page: Page): Promise<void> {
+    await page.route("https://npub.cash/api/v2/**", async (route) => {
+      const url = new URL(route.request().url())
+      if (url.pathname === "/api/v2/auth/nip98") {
+        await fulfillJson(route, {
+          error: false,
+          data: { token: "browser-test-jwt" },
+        })
+        return
+      }
+      if (url.pathname === "/api/v2/wallet/quotes") {
+        const since = Number(url.searchParams.get("since") ?? 0)
+        const quotes = this.quotes.filter((quote) => quote.paidAt > since)
+        await fulfillJson(route, {
+          error: false,
+          data: { quotes },
+          metadata: { total: quotes.length, limit: 50 },
+        })
+        return
+      }
+      await fulfillJson(route, { message: "Not found" }, 404)
+    })
+
+    for (const [mintUrl, keyset] of this.keysByMint) {
+      await page.route(`${mintUrl}/**`, async (route) => {
+        const request = route.request()
+        const url = new URL(request.url())
+        this.mintRequestPaths.push(url.pathname)
+        if (url.pathname === "/v1/info") {
+          await fulfillJson(route, {
+            name: `Test mint ${url.host}`,
+            version: "Nutshell/0.17.0",
+            nuts: {
+              "4": {
+                methods: [
+                  {
+                    method: "bolt11",
+                    unit: "sat",
+                    min_amount: 1,
+                    max_amount: 1_000_000,
+                  },
+                ],
+                disabled: false,
+              },
+              "5": { methods: [], disabled: true },
+            },
+          })
+          return
+        }
+        if (url.pathname === "/v1/keysets") {
+          await fulfillJson(route, {
+            keysets: [
+              {
+                id: keyset.keysetId,
+                unit: "sat",
+                active: true,
+                input_fee_ppk: 0,
+              },
+            ],
+          })
+          return
+        }
+        if (url.pathname.startsWith("/v1/keys")) {
+          await fulfillJson(route, {
+            keysets: [
+              {
+                id: keyset.keysetId,
+                unit: "sat",
+                active: true,
+                keys: Object.fromEntries(
+                  Object.entries(keyset.pubKeys).map(([amount, key]) => [
+                    amount,
+                    Buffer.from(key).toString("hex"),
+                  ])
+                ),
+              },
+            ],
+          })
+          return
+        }
+        if (url.pathname.startsWith("/v1/mint/quote/bolt11/")) {
+          const quoteId = url.pathname.split("/").at(-1)!
+          const quote = this.quotes.find(
+            (candidate) => candidate.quoteId === quoteId
+          )
+          await fulfillJson(route, {
+            quote: quoteId,
+            request: quote?.request ?? "",
+            state: "PAID",
+            expiry: quote?.expiresAt ?? 1_800_000_000,
+            amount: quote?.amount ?? 0,
+            unit: "sat",
+          })
+          return
+        }
+        if (url.pathname === "/v1/mint/bolt11") {
+          this.mintAttempts += 1
+          const payload = request.postDataJSON() as {
+            outputs: Array<{ amount: number; B_: string; id: string }>
+          }
+          await fulfillJson(route, {
+            signatures: payload.outputs.map((output) => {
+              const privateKey = keyset.privKeys[String(output.amount)]
+              if (!privateKey) throw new Error("Missing test mint key")
+              const signature = createBlindSignature(
+                pointFromHex(output.B_),
+                privateKey,
+                output.id
+              )
+              return {
+                amount: output.amount,
+                id: output.id,
+                C_: signature.C_.toHex(true),
+              }
+            }),
+          })
+          return
+        }
+        await fulfillJson(route, { message: "Not found" }, 404)
+      })
+    }
+  }
+}
+
+test.beforeEach(async ({ page }) => {
+  await new BrowserPaymentFixture([]).install(page)
+})
 
 type Nip46RelayTarget = {
   route: WebSocketRoute
@@ -127,17 +308,17 @@ class Nip46RelayFixture {
         event.content,
         getConversationKey(this.remoteSecretKey, event.pubkey)
       )
-    ) as { id: string; method: string }
+    ) as { id: string; method: string; params: string[] }
     const subscriptionId = this.subscriptionFor(subscriptions, event.pubkey)
     if (!subscriptionId) return
 
     if (request.method === "logout" && this.logoutFailure) {
       await this.sendResponse(
-          event.pubkey,
-          request.id,
-          undefined,
-          this.logoutFailure,
-          { route, subscriptionId }
+        event.pubkey,
+        request.id,
+        undefined,
+        this.logoutFailure,
+        { route, subscriptionId }
       )
       return
     }
@@ -152,13 +333,10 @@ class Nip46RelayFixture {
       return
     }
     if (request.method === "switch_relays") {
-      await this.sendResponse(
-        event.pubkey,
-        request.id,
-        "null",
-        undefined,
-        { route, subscriptionId }
-      )
+      await this.sendResponse(event.pubkey, request.id, "null", undefined, {
+        route,
+        subscriptionId,
+      })
       return
     }
     if (request.method === "get_public_key") {
@@ -187,14 +365,27 @@ class Nip46RelayFixture {
       }
       return
     }
-    if (request.method === "logout") {
+    if (request.method === "sign_event") {
+      const template = JSON.parse(request.params[0]!) as Record<string, unknown>
       await this.sendResponse(
         event.pubkey,
         request.id,
-        "ack",
+        JSON.stringify({
+          ...template,
+          pubkey: this.recipientPublicKey,
+          id: "1".repeat(64),
+          sig: "2".repeat(128),
+        }),
         undefined,
         { route, subscriptionId }
       )
+      return
+    }
+    if (request.method === "logout") {
+      await this.sendResponse(event.pubkey, request.id, "ack", undefined, {
+        route,
+        subscriptionId,
+      })
     }
   }
 
@@ -269,7 +460,10 @@ async function failNip46Persistence(
     if (enabled) control.enabled = true
     Object.assign(window, { __npubcashFailNip46Save: control })
     const originalPut = IDBObjectStore.prototype.put
-    IDBObjectStore.prototype.put = function (value: unknown, key?: IDBValidKey) {
+    IDBObjectStore.prototype.put = function (
+      value: unknown,
+      key?: IDBValidKey
+    ) {
       if (
         control.enabled &&
         value &&
@@ -290,7 +484,10 @@ async function delayNip46Persistence(page: Page): Promise<void> {
     const control = { pending: false, release: false }
     Object.assign(window, { __npubcashNip46Save: control })
     const originalPut = IDBObjectStore.prototype.put
-    IDBObjectStore.prototype.put = function (value: unknown, key?: IDBValidKey) {
+    IDBObjectStore.prototype.put = function (
+      value: unknown,
+      key?: IDBValidKey
+    ) {
       const request =
         key === undefined
           ? originalPut.call(this, value)
@@ -334,14 +531,16 @@ async function installNip07(page: Page, publicKey = PUBLIC_KEY_A) {
   }, publicKey)
 }
 
-async function signIn(page: Page) {
+async function signIn(page: Page, expectedBalance = 0) {
   await page.goto("/")
   await page
     .getByRole("button", { name: "Continue with browser extension" })
     .click()
   await finishOpening(page)
   await expect(page).toHaveURL(/\/wallet$/)
-  await expect(page.getByText("0 sat", { exact: true })).toBeVisible()
+  await expect(
+    page.getByText(`${expectedBalance} sat`, { exact: true })
+  ).toBeVisible()
 }
 
 async function signInWithNsec(page: Page) {
@@ -458,6 +657,116 @@ async function signInWithRemoteSigner(
   await finishOpening(page)
   await expect(page).toHaveURL(/\/wallet$/)
 }
+
+test("one paid quote becomes persisted balance once across reload and repeated sync", async ({
+  page,
+}) => {
+  const payments = new BrowserPaymentFixture([
+    {
+      quoteId: "browser-quote-one",
+      mintUrl: "https://mint-one.example",
+      amount: 21,
+      expiresAt: 1_800_000_000,
+      paidAt: 1_700_000_001,
+      request: "lnbc21",
+      locked: false,
+    },
+  ])
+  await payments.install(page)
+  await installNip07(page)
+
+  await signIn(page, 21)
+  await expect(page.getByText("21 sat added to your balance")).toBeVisible()
+  expect(payments.mintAttempts).toBe(1)
+
+  await page.reload()
+  await expect(page.getByText("21 sat", { exact: true })).toBeVisible()
+  expect(payments.mintAttempts).toBe(1)
+
+  await page.reload()
+  await expect(page.getByText("21 sat", { exact: true })).toBeVisible()
+  expect(payments.mintAttempts).toBe(1)
+})
+
+test("paid quotes aggregate across two mints and keep a visible mint split", async ({
+  page,
+}) => {
+  const payments = new BrowserPaymentFixture([
+    {
+      quoteId: "browser-quote-mint-one",
+      mintUrl: "https://mint-one.example",
+      amount: 21,
+      expiresAt: 1_800_000_000,
+      paidAt: 1_700_000_001,
+      request: "lnbc21",
+      locked: false,
+    },
+    {
+      quoteId: "browser-quote-mint-two",
+      mintUrl: "https://mint-two.example",
+      amount: 34,
+      expiresAt: 1_800_000_000,
+      paidAt: 1_700_000_002,
+      request: "lnbc34",
+      locked: false,
+    },
+  ])
+  await payments.install(page)
+  await installNip07(page)
+
+  await signIn(page, 55)
+  await page.getByRole("button", { name: "Mint breakdown" }).click()
+
+  await expect(
+    page.getByText("mint-one.example", { exact: true })
+  ).toBeVisible()
+  await expect(page.getByText("21 sat", { exact: true })).toBeVisible()
+  await expect(
+    page.getByText("mint-two.example", { exact: true })
+  ).toBeVisible()
+  await expect(page.getByText("34 sat", { exact: true })).toBeVisible()
+  expect(payments.mintAttempts).toBe(2)
+})
+
+test("a protected payment stays visible and never reaches Coco or its mint", async ({
+  page,
+}) => {
+  const payments = new BrowserPaymentFixture([
+    {
+      quoteId: "browser-locked-quote",
+      mintUrl: "https://protected-mint.example",
+      amount: 34,
+      expiresAt: 1_800_000_000,
+      paidAt: 1_700_000_003,
+      request: "lnbc34",
+      locked: true,
+    },
+  ])
+  await payments.install(page)
+  await installNip07(page)
+
+  await signIn(page)
+  await expect(page.getByText("Protected payment unsupported")).toBeVisible()
+  expect(payments.mintRequestPaths).toEqual([])
+
+  await page.reload()
+  await expect(page.getByText("Protected payment unsupported")).toBeVisible()
+  expect(payments.mintRequestPaths).toEqual([])
+})
+
+test("npub.cash authorization failure is explicit and recoverable", async ({
+  page,
+}) => {
+  await page.route("https://npub.cash/api/v2/**", async (route) => {
+    await fulfillJson(route, { message: "authorization denied" }, 401)
+  })
+  await installNip07(page)
+
+  await signIn(page)
+
+  await expect(page.getByText("npub.cash authorization failed")).toBeVisible()
+  await expect(page.getByRole("button", { name: "Check again" })).toBeVisible()
+})
 
 test("remote signer QR/copy pairing keeps auth correlated and persists only the established connection", async ({
   page,

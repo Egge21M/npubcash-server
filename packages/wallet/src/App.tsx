@@ -1,5 +1,6 @@
 import { createBrowserRouter, RouterProvider } from "react-router-dom"
 
+import { Toaster } from "@/components/ui/toast"
 import { WalletRuntimeProvider } from "@/wallet/wallet-runtime-provider"
 import {
   AuthenticatedLayout,
@@ -29,7 +30,11 @@ const router = createBrowserRouter([
 ])
 
 export function App() {
-  return <RouterProvider router={router} />
+  return (
+    <Toaster>
+      <RouterProvider router={router} />
+    </Toaster>
+  )
 }
 
 export default App

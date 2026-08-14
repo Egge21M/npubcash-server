@@ -120,6 +120,45 @@ async function settle(): Promise<void> {
 }
 
 describe("NIP-46 session", () => {
+  test("signs an npub.cash authentication event through sign_event", async () => {
+    const relay = new FakeRelayAdapter()
+    const clientSecretKey = generateSecretKey()
+    const remoteSecretKey = generateSecretKey()
+    const recipientSecretKey = generateSecretKey()
+    const session = new Nip46Session(
+      clientSecretKey,
+      getPublicKey(remoteSecretKey),
+      [INITIAL_RELAY],
+      { relay, timeoutMs: 1_000 }
+    )
+    const template = {
+      kind: 27235,
+      created_at: 1_700_000_000,
+      tags: [
+        ["u", "https://npub.cash/api/v2/auth/nip98"],
+        ["method", "GET"],
+      ],
+      content: "",
+    }
+
+    const signedPromise = session.signEvent(template)
+    await settle()
+    const request = readRequest(relay.published.at(-1)!.event, remoteSecretKey)
+    expect(request.method).toBe("sign_event")
+    expect(JSON.parse(request.params[0]!)).toEqual(template)
+
+    const signed = finalizeEvent(template, recipientSecretKey)
+    relay.deliver(
+      responseEvent(remoteSecretKey, session.clientPublicKey, {
+        id: request.id,
+        result: JSON.stringify(signed),
+      })
+    )
+
+    expect(await signedPromise).toEqual(JSON.parse(JSON.stringify(signed)))
+    await session.close()
+  })
+
   test("distinguishes a spoofed one-time response without selecting its author", async () => {
     const relay = new FakeRelayAdapter()
     const spoofingSecretKey = generateSecretKey()

@@ -3,10 +3,18 @@ import {
   ChevronDownIcon,
   CircleAlertIcon,
   InboxIcon,
+  RefreshCwIcon,
   ShieldAlertIcon,
 } from "lucide-react"
+import { useEffect, useRef, useSyncExternalStore } from "react"
 
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import {
+  Alert,
+  AlertAction,
+  AlertDescription,
+  AlertTitle,
+} from "@/components/ui/alert"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -28,7 +36,111 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty"
+import { Spinner } from "@/components/ui/spinner"
+import { toast } from "@/components/ui/toast"
 import { useWalletRuntime } from "./wallet-runtime-context"
+import type { WalletRuntime } from "./wallet-runtime"
+
+function PaymentSyncStatus({ runtime }: { runtime: WalletRuntime }) {
+  const snapshot = useSyncExternalStore(
+    (listener) => runtime.subscribePaymentSync(listener),
+    () => runtime.paymentSyncSnapshot(),
+    () => runtime.paymentSyncSnapshot()
+  )
+  const toastedOperation = useRef<string | null>(null)
+
+  useEffect(() => {
+    const success = snapshot.lastSuccess
+    if (!success || toastedOperation.current === success.operationId) return
+    toastedOperation.current = success.operationId
+    toast.add({
+      title: `${success.amount} sat added to your balance`,
+      description: `Claimed from ${new URL(success.mintUrl).host}.`,
+      type: "success",
+      timeout: 4_000,
+    })
+  }, [snapshot.lastSuccess])
+
+  const hasProblems = snapshot.issues.length > 0
+
+  return (
+    <section className="flex flex-col gap-3" aria-labelledby="payments-title">
+      <div className="flex items-center justify-between gap-3">
+        <h2 id="payments-title" className="text-sm font-medium">
+          Payments
+        </h2>
+        <Badge
+          variant={hasProblems ? "destructive" : "outline"}
+          aria-live="polite"
+        >
+          {snapshot.checking && <Spinner data-icon="inline-start" />}
+          {snapshot.checking
+            ? "Checking npub.cash"
+            : hasProblems
+              ? "Needs attention"
+              : "Up to date"}
+        </Badge>
+      </div>
+
+      {snapshot.claims.map((claim) => (
+        <Alert key={claim.operationId}>
+          <Spinner />
+          <AlertTitle>
+            {claim.state === "executing" ? "Claiming" : "Claim pending"}{" "}
+            {claim.amount} sat
+          </AlertTitle>
+          <AlertDescription>
+            Coco has persisted this claim from {new URL(claim.mintUrl).host}.
+            The Wallet will reconcile it without creating a duplicate.
+          </AlertDescription>
+        </Alert>
+      ))}
+
+      {snapshot.issues.map((issue, index) => (
+        <Alert
+          key={`${issue.kind}:${index}`}
+          variant={
+            issue.kind === "protected-payment" ? "default" : "destructive"
+          }
+        >
+          <CircleAlertIcon />
+          <AlertTitle>{issue.title}</AlertTitle>
+          <AlertDescription>{issue.message}</AlertDescription>
+          <AlertAction>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={snapshot.checking}
+              onClick={() => void runtime.syncPayments()}
+            >
+              {snapshot.checking ? (
+                <Spinner data-icon="inline-start" />
+              ) : (
+                <RefreshCwIcon data-icon="inline-start" />
+              )}
+              Check again
+            </Button>
+          </AlertAction>
+        </Alert>
+      ))}
+
+      {snapshot.claims.length === 0 && snapshot.issues.length === 0 && (
+        <Empty>
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <InboxIcon />
+            </EmptyMedia>
+            <EmptyTitle>No payments waiting</EmptyTitle>
+            <EmptyDescription>
+              Paid npub.cash payments will be claimed automatically while this
+              Wallet is open and online.
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      )}
+    </section>
+  )
+}
 
 export function WalletPage() {
   const { state } = useWalletRuntime()
@@ -112,17 +224,7 @@ export function WalletPage() {
         </CardFooter>
       </Card>
 
-      <Empty>
-        <EmptyHeader>
-          <EmptyMedia variant="icon">
-            <InboxIcon />
-          </EmptyMedia>
-          <EmptyTitle>Payments</EmptyTitle>
-          <EmptyDescription>
-            No payments are waiting to be claimed.
-          </EmptyDescription>
-        </EmptyHeader>
-      </Empty>
+      <PaymentSyncStatus runtime={state.runtime} />
     </>
   )
 }

@@ -8,11 +8,8 @@ import {
   getPublicKey,
 } from "nostr-tools/pure"
 
-import { normalizePublicKey } from "./nip07"
-import {
-  InvalidNip46RelayError,
-  normalizeNip46Relay,
-} from "./nip46-relay"
+import { normalizePublicKey, type Nip07Event } from "./nip07"
+import { InvalidNip46RelayError, normalizeNip46Relay } from "./nip46-relay"
 
 export const NIP46_PROTOCOL_VERSION = 1
 export const DEFAULT_NIP46_TIMEOUT_MS = 60_000
@@ -223,6 +220,35 @@ function readAuthorizationUrl(value: string | undefined): string {
   return url.toString()
 }
 
+function readSignedEvent(value: string): Nip07Event {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    throw new Nip46ProtocolError("The remote signer returned an invalid event.")
+  }
+  if (!parsed || typeof parsed !== "object") {
+    throw new Nip46ProtocolError("The remote signer returned an invalid event.")
+  }
+  const event = parsed as Record<string, unknown>
+  if (
+    typeof event.kind !== "number" ||
+    typeof event.created_at !== "number" ||
+    typeof event.content !== "string" ||
+    !Array.isArray(event.tags) ||
+    !event.tags.every(
+      (tag) =>
+        Array.isArray(tag) && tag.every((value) => typeof value === "string")
+    ) ||
+    typeof event.pubkey !== "string" ||
+    typeof event.id !== "string" ||
+    typeof event.sig !== "string"
+  ) {
+    throw new Nip46ProtocolError("The remote signer returned an invalid event.")
+  }
+  return parsed as Nip07Event
+}
+
 export class SimplePoolNip46RelayAdapter implements Nip46RelayAdapter {
   private readonly pool = new SimplePool({ enableReconnect: true })
 
@@ -404,6 +430,12 @@ export class Nip46Session {
       throw new Nip46PublicKeyMismatchError()
     }
     return actualPublicKey
+  }
+
+  async signEvent(event: Nip07Event): Promise<Nip07Event> {
+    return readSignedEvent(
+      await this.request("sign_event", [JSON.stringify(event)])
+    )
   }
 
   async logout(timeoutMs = DEFAULT_NIP46_LOGOUT_TIMEOUT_MS): Promise<void> {
