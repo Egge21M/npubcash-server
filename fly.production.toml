@@ -1,0 +1,29 @@
+
+app = "npubcash-v3"
+primary_region = "ams"
+
+[build]
+dockerfile = "Dockerfile"
+
+[env]
+ALLOWED_HOSTNAMES = "npub.cash,npubx.cash,npuby.cash,npubcash-v3.fly.dev"
+API_MODE = "BOTH"
+DATABASE_TYPE = "postgres"
+LNURL_MAX_AMOUNT = "100000000"
+LNURL_MIN_AMOUNT = "1000"
+LOG_LEVEL = "debug"
+MINTURL = "https://mint.minibits.cash/Bitcoin"
+NOSTR_ENABLED = "true"
+USERNAME_COST = "5000"
+USERNAME_MINT = "https://mint.minibits.cash/Bitcoin"
+
+[http_service]
+auto_start_machines = true
+auto_stop_machines = "off"
+force_https = true
+internal_port = 8000
+min_machines_running = 0
+processes = ["app"]
+
+[[vm]]
+size = "shared-cpu-1x"
