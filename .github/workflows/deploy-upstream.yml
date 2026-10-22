@@ -2,7 +2,7 @@ name: Deploy upstream V3
 
 on:
   schedule:
-    - cron: '7-59/10 * * * *'
+    - cron: '7 */6 * * *'
   workflow_dispatch:
     inputs:
       force:

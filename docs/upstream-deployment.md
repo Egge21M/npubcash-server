@@ -5,7 +5,8 @@ Production at https://npub.cash runs code from `cashubtc/npubcash-server`'s
 Application code does not need to be synced or merged into the fork.
 
 The **Deploy upstream V3** workflow on the fork's default branch (`main`)
-checks upstream every ten minutes. GitHub schedules may be delayed. It selects
+checks upstream four times daily, at 00:07, 06:07, 12:07, and 18:07 UTC.
+Manual runs remain available at any time. GitHub schedules may be delayed. It selects
 the current upstream `v3` commit only after its latest push-triggered **Build**
 run succeeds, including the `test`, `build`, and `production-runtime` jobs.
 Pending or failed CI leaves the existing production release running.
