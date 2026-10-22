@@ -78,7 +78,10 @@ jobs:
             echo "::error::Set FLY_API_TOKEN to an app-scoped deploy token for npubcash-v3."
             exit 1
           fi
-          flyctl deploy --config ../deployment-config/fly.production.toml --dockerfile Dockerfile --remote-only --ha=false
+          # Fly resolves [build].dockerfile relative to the configuration file.
+          # Place our separately versioned config beside the upstream Dockerfile.
+          cp ../deployment-config/fly.production.toml fly.production.toml
+          flyctl deploy --config fly.production.toml --remote-only --ha=false
 
       - name: Record successfully deployed upstream revision
         if: steps.plan.outputs.deploy == 'true'
