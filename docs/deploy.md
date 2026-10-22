@@ -12,9 +12,10 @@ v2-to-v3 cutover notes that are useful to operators of existing installations.
 
 Production at https://npub.cash automatically follows `cashubtc/npubcash-server`
 branch `v3` after its Build CI succeeds. The fork's **Deploy upstream V3**
-workflow runs from its default branch (`main`) every ten minutes and deploys
-that exact upstream commit with `fly.production.toml` from this `prod` branch.
-GitHub schedules may be delayed.
+workflow runs from its default branch (`main`) four times daily, at 00:07,
+06:07, 12:07, and 18:07 UTC, and deploys that exact upstream commit with
+`fly.production.toml` from this `prod` branch. Manual runs remain available
+at any time. GitHub schedules may be delayed.
 
 Keep production configuration changes on `prod`; application code no longer
 needs to be synced or merged here. Pushing to `prod` runs CI but does not
