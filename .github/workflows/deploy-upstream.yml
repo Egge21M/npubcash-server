@@ -1,0 +1,89 @@
+name: Deploy upstream V3
+
+on:
+  schedule:
+    - cron: '7-59/10 * * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Redeploy even if the source and production configuration are unchanged
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+  deployments: write
+
+# Serialize selection, deployment, and recording so an older run cannot race a
+# newer release. This also shares the former prod deploy job's concurrency group.
+concurrency:
+  group: fly-npubcash-v3
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: >-
+      github.repository == 'Egge21M/npubcash-server' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment:
+      name: production
+      url: https://npub.cash
+    steps:
+      - name: Check out deployment automation
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          path: automation
+
+      - name: Select upstream revision with successful CI
+        id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          FORCE_DEPLOY: ${{ inputs.force || false }}
+        run: node automation/.github/scripts/deploy-upstream.mjs plan
+
+      - name: Check out tested upstream code
+        if: steps.plan.outputs.deploy == 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: cashubtc/npubcash-server
+          ref: ${{ steps.plan.outputs.source_sha }}
+          path: source
+          persist-credentials: false
+
+      - name: Check out production configuration
+        if: steps.plan.outputs.deploy == 'true'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.plan.outputs.config_ref }}
+          path: deployment-config
+          sparse-checkout: fly.production.toml
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Set up Fly CLI
+        if: steps.plan.outputs.deploy == 'true'
+        uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
+
+      - name: Deploy production
+        if: steps.plan.outputs.deploy == 'true'
+        working-directory: source
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          if [ -z "$FLY_API_TOKEN" ]; then
+            echo "::error::Set FLY_API_TOKEN to an app-scoped deploy token for npubcash-v3."
+            exit 1
+          fi
+          flyctl deploy --config ../deployment-config/fly.production.toml --remote-only --ha=false
+
+      - name: Record successfully deployed upstream revision
+        if: steps.plan.outputs.deploy == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.plan.outputs.source_sha }}
+          CONFIG_SHA: ${{ steps.plan.outputs.config_sha }}
+        run: node automation/.github/scripts/deploy-upstream.mjs record
