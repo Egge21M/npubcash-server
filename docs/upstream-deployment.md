@@ -14,8 +14,12 @@ The workflow checks out that exact source commit and a pinned `prod` revision,
 then runs this command from the source checkout:
 
 ```sh
-flyctl deploy --config ../deployment-config/fly.production.toml --remote-only --ha=false
+flyctl deploy --config ../deployment-config/fly.production.toml --dockerfile Dockerfile --remote-only --ha=false
 ```
+
+The explicit Dockerfile option selects the upstream Dockerfile in the source
+checkout; the config's relative Dockerfile path would otherwise resolve beside
+the configuration file.
 
 The app remains `npubcash-v3` in Amsterdam, using PostgreSQL and its existing
 Fly runtime secrets. The upstream `fly.toml` targets a separate nightly SQLite
